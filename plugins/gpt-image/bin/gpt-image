@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Картинки GPT Image через Codex CLI (инструмент каталога gpt-image): промпт, референсы, папка → PNG в папке.
+
+    gpt-image --out <папка> [-i ref.png ...] [--n 1-4] [--name имя] [--size 1024x1024] "<промпт>"
+    gpt-image --out <папка> --prompt-file prompt.md ...
+
+Codex генерирует своим инструментом image_generation по подписке ChatGPT (вход — `codex login`, ключ API не нужен),
+картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
+Итог — последняя строка JSON: {"files": [...]}. Codex — из GPT_IMAGE_CODEX, PATH или ~/.local/bin/codex; прокси из
+окружения (HTTPS_PROXY) codex берёт сам. Генерация идёт минуты: сессия запускает это фоном.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+TIMEOUT = 20 * 60
+
+
+def codex():
+    for c in (os.environ.get("GPT_IMAGE_CODEX"), shutil.which("codex"), os.path.expanduser("~/.local/bin/codex")):
+        if c and os.path.exists(c):
+            return c
+    sys.exit("gpt-image: нет codex — поставьте Codex CLI (или ChatGPT.app) и войдите: codex login")
+
+
+def names(out, base, n):
+    got, i = [], 1
+    while len(got) < n:
+        name = f"{base}-{i}.png"
+        if not os.path.exists(os.path.join(out, name)):
+            got.append(name)
+        i += 1
+    return got
+
+
+def task(prompt, files, refs, size):
+    lines = [f"Generate {len(files)} image(s) with your image generation tool. Pass this prompt to the tool as is, "
+             "without rewriting it:", "", prompt, ""]
+    if refs:
+        lines.append(f"Use the {len(refs)} attached image(s) as references, as the prompt describes.")
+    if size:
+        lines.append(f"Size: {size}.")
+    lines += ["Save the results as PNG into the current directory under exactly these names: "
+              + ", ".join(f"`{f}`" for f in files) + ".",
+              "Do not create, change or delete any other file. Reply with the saved file names only."]
+    return "\n".join(lines)
+
+
+def reason(r, said):
+    """Почему нет картинок (07.10: было только «не получилось»): истекло время; строки ошибок из вывода codex (лимит
+    подписки, вход, сеть и прокси); его последнее сообщение; иначе код выхода."""
+    if r is None:
+        return f"codex не уложился в {TIMEOUT // 60} мин"
+    errors = [x.strip() for x in (r.stderr or "").splitlines()
+              if re.search(r"error|limit|unauthori|forbidden|refus|denied|polic|proxy|connect|timed? ?out|429|403|401",
+                           x, re.I)]
+    parts = errors[-2:] + ([said] if said and said not in errors else [])
+    text = " · ".join(p for p in parts if p) or f"codex завершился с кодом {r.returncode}, без объяснения"
+    return text[:600]
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="gpt-image")
+    ap.add_argument("prompt", nargs="?")
+    ap.add_argument("--prompt-file")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("-i", "--image", action="append", default=[])
+    ap.add_argument("--n", type=int, default=1)
+    ap.add_argument("--name", default="image")
+    ap.add_argument("--size")
+    a = ap.parse_args()
+    prompt = open(a.prompt_file, encoding="utf-8").read() if a.prompt_file else a.prompt
+    if not (prompt or "").strip():
+        sys.exit("gpt-image: нужен промпт")
+    refs = [os.path.abspath(os.path.expanduser(r)) for r in a.image]
+    missing = [r for r in refs if not os.path.isfile(r)]
+    if missing:
+        sys.exit("gpt-image: нет референса: " + ", ".join(missing))
+    n = max(1, min(4, a.n))
+    out = os.path.abspath(os.path.expanduser(a.out))
+    os.makedirs(out, exist_ok=True)
+    files = names(out, a.name, n)
+    last = tempfile.NamedTemporaryFile(prefix="gpt-image-", suffix=".txt", delete=False).name
+    cmd = [codex(), "exec", "--skip-git-repo-check", "-C", out, "-s", "workspace-write", "-o", last,
+           "-c", "model_reasoning_effort=low"]
+    for r in refs:
+        cmd += ["-i", r]
+    cmd += ["--", task(prompt.strip(), files, refs, a.size)]   # -i берёт несколько файлов: без «--» съел бы промпт
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        r = None
+    said = ""
+    try:
+        with open(last, encoding="utf-8") as f:
+            said = f.read().strip()   # последнее слово codex: отказ модерации, «не смог» — его же словами
+        os.remove(last)
+    except OSError:
+        pass
+    made = [os.path.join(out, f) for f in files if os.path.isfile(os.path.join(out, f))]
+    if not made:
+        sys.exit(f"gpt-image: картинок не получилось — {reason(r, said)}")
+    print(json.dumps({"files": made}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

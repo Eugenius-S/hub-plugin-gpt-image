@@ -1,0 +1,17 @@
+{
+  "name": "hub-plugin-gpt-image",
+  "owner": {
+    "name": "Eugenius-S"
+  },
+  "plugins": [
+    {
+      "name": "gpt-image",
+      "source": "./plugins/gpt-image",
+      "description": "GPT Image — генерация картинок через Codex CLI по вашей подписке ChatGPT: промпт, до 16 референсов и папка — картинки ложатся прямо в проект. Без API-ключа и отдельной оплаты; работает фоном, при сбое показывает причину (лимит, модерация, сеть). Риск: промпты и референсы уходят в OpenAI.",
+      "version": "1.0.0",
+      "keywords": [
+        "risk:external"
+      ]
+    }
+  ]
+}

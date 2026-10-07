@@ -1,0 +1,100 @@
+"""Скрипт плагина gpt-image на подставном codex: файлы в папке, аргументы, не затирает старое, причина сбоя.
+
+    python3 -m unittest discover -s tests
+"""
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(REPO, "plugins", "gpt-image", "bin", "gpt-image")
+
+# подставной codex: пишет args в файл и кладёт PNG в папку -C, сколько попросили (n из промпта)
+FAKE = """#!/usr/bin/env python3
+import json, os, re, sys
+a = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "w") as f:
+    json.dump({"args": a, "stdin": sys.stdin.read()}, f)
+cd = a[a.index("-C") + 1]
+prompt = a[-1]
+names = re.findall(r"`([\\w.-]+\\.png)`", prompt)
+if os.environ.get("FAKE_SAY"):            # codex дошёл до конца, но картинку не сделал — сказал почему
+    open(a[a.index("-o") + 1], "w").write(os.environ["FAKE_SAY"])
+    sys.exit(0)
+if os.environ.get("FAKE_FAIL"):
+    sys.stderr.write("[2026-10-07T12:00:00] codex\\nthinking...\\n" + os.environ["FAKE_FAIL"] + "\\ntokens used\\n1 234\\n")
+    sys.exit(1)
+for n in names:
+    open(os.path.join(cd, n), "wb").write(b"\\x89PNG\\r\\n\\x1a\\n")
+open(a[a.index("-o") + 1], "w").write("ok")
+"""
+
+
+class Script(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gpt-image-")
+        self.codex = os.path.join(self.tmp, "codex")
+        with open(self.codex, "w") as f:
+            f.write(FAKE)
+        os.chmod(self.codex, os.stat(self.codex).st_mode | stat.S_IEXEC)
+        self.log = os.path.join(self.tmp, "log.json")
+        self.out = os.path.join(self.tmp, "out")
+        self.ref = os.path.join(self.tmp, "ref.png")
+        open(self.ref, "wb").write(b"\x89PNG")
+
+    def run_script(self, *args, fail=False, say=None):
+        env = {**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log,
+               **({"FAKE_FAIL": fail if isinstance(fail, str) else "ERROR: boom"} if fail else {}),
+               **({"FAKE_SAY": say} if say else {})}
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=env, timeout=30)
+
+    def test_images_land_in_the_folder_and_the_result_lists_them(self):
+        r = self.run_script("--out", self.out, "-i", self.ref, "--n", "2", "--name", "apple",
+                            "glossy red apple on white")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        res = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual([os.path.basename(p) for p in res["files"]], ["apple-1.png", "apple-2.png"])
+        self.assertTrue(all(os.path.exists(p) for p in res["files"]))
+        call = json.load(open(self.log))
+        a = call["args"]
+        self.assertEqual(a[0], "exec")
+        self.assertEqual(a[a.index("-C") + 1], self.out)
+        self.assertEqual(a[a.index("-i") + 1], os.path.abspath(self.ref))   # референс — картинкой в codex
+        self.assertIn("glossy red apple on white", a[-1])                    # промпт — как дала сессия
+        self.assertEqual(a[-2], "--")                                        # -i не съедает промпт
+        self.assertEqual(call["stdin"], "")                                  # stdin закрыт: codex не ждёт EOF
+
+    def test_existing_files_are_not_overwritten(self):
+        os.makedirs(self.out)
+        open(os.path.join(self.out, "apple-1.png"), "wb").write(b"old")
+        r = self.run_script("--out", self.out, "--name", "apple", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1])["files"], [os.path.join(self.out, "apple-2.png")])
+        self.assertEqual(open(os.path.join(self.out, "apple-1.png"), "rb").read(), b"old")
+
+    def test_no_images_is_an_error(self):
+        r = self.run_script("--out", self.out, "x", fail=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("не получилось", r.stderr)
+
+    def test_the_reason_from_codex_is_shown(self):
+        # 07.10: у дизайнера три запуска подряд — «картинок не получилось» без причины
+        r = self.run_script("--out", self.out, "x", fail="ERROR: You've hit your usage limit. Try again at 13:40.")
+        self.assertIn("usage limit", r.stderr)
+        self.assertNotIn("tokens used", r.stderr)
+        r = self.run_script("--out", self.out, "x", say="I can't create that image: it violates the content policy.")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("content policy", r.stderr)
+
+    def test_missing_reference_fails_fast(self):
+        r = self.run_script("--out", self.out, "-i", os.path.join(self.tmp, "nope.png"), "x")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.log))   # codex не звали
+
+
+if __name__ == "__main__":
+    unittest.main()
