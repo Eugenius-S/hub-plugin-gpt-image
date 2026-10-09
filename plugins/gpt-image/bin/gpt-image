@@ -8,6 +8,8 @@ Codex генерирует своим инструментом image_generation 
 картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
 Итог — последняя строка JSON: {"files": [...]}. Codex — из GPT_IMAGE_CODEX, PATH или ~/.local/bin/codex; прокси из
 окружения (HTTPS_PROXY) codex берёт сам. Генерация идёт минуты: сессия запускает это фоном.
+Codex идёт в своём CODEX_HOME (GPT_IMAGE_HOME, по умолчанию ~/.cache/gpt-image/codex-home): вход — ссылкой на auth.json
+владельца, его общие правила (~/.codex/AGENTS.md) и плагины Codex генерации не мешают.
 """
 import argparse
 import json
@@ -26,6 +28,38 @@ def codex():
         if c and os.path.exists(c):
             return c
     sys.exit("gpt-image: нет codex — поставьте Codex CLI (или ChatGPT.app) и войдите: codex login")
+
+
+def isolated():
+    """Свой CODEX_HOME для генерации или None (ссылку не сделать — Windows без прав; тогда обычный дом codex).
+    09.10: общий ~/.codex/AGENTS.md требовал скиллы Foundation — codex через раз отказывался сохранять картинку."""
+    real = os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"))
+    auth = os.path.join(real, "auth.json")
+    home = os.path.abspath(os.path.expanduser(os.environ.get("GPT_IMAGE_HOME") or "~/.cache/gpt-image/codex-home"))
+    if not os.path.isfile(auth) or home == real:
+        return None
+    try:
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        link = os.path.join(home, "auth.json")
+        if not os.path.islink(link):
+            if os.path.exists(link):
+                os.remove(link)
+            os.symlink(auth, link)
+        if not os.path.exists(os.path.join(home, "config.toml")):
+            open(os.path.join(home, "config.toml"), "w").close()
+    except OSError:
+        return None
+    return home
+
+
+def settle(home):
+    """Codex обновил вход и записал auth.json файлом вместо ссылки — свежий вход отдать владельцу, ссылку вернуть:
+    иначе у его codex остался бы старый, уже отозванный токен."""
+    link = os.path.join(home, "auth.json")
+    if os.path.isfile(link) and not os.path.islink(link):
+        real = os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")), "auth.json")
+        os.replace(link, real)
+        os.symlink(real, link)
 
 
 def names(out, base, n):
@@ -91,10 +125,15 @@ def main():
     for r in refs:
         cmd += ["-i", r]
     cmd += ["--", task(prompt.strip(), files, refs, a.size)]   # -i берёт несколько файлов: без «--» съел бы промпт
+    home = isolated()
+    env = {**os.environ, "CODEX_HOME": home} if home else None
     try:
-        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT)
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         r = None
+    finally:
+        if home:
+            settle(home)
     said = ""
     try:
         with open(last, encoding="utf-8") as f:

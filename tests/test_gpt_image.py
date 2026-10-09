@@ -18,7 +18,11 @@ FAKE = """#!/usr/bin/env python3
 import json, os, re, sys
 a = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "w") as f:
-    json.dump({"args": a, "stdin": sys.stdin.read()}, f)
+    json.dump({"args": a, "stdin": sys.stdin.read(), "home": os.environ.get("CODEX_HOME")}, f)
+if os.environ.get("FAKE_REFRESH"):        # codex обновил вход: записал auth.json заново (ссылка стала файлом)
+    h = os.environ["CODEX_HOME"]
+    os.remove(os.path.join(h, "auth.json"))
+    open(os.path.join(h, "auth.json"), "w").write("fresh")
 cd = a[a.index("-C") + 1]
 prompt = a[-1]
 names = re.findall(r"`([\\w.-]+\\.png)`", prompt)
@@ -45,9 +49,14 @@ class Script(unittest.TestCase):
         self.out = os.path.join(self.tmp, "out")
         self.ref = os.path.join(self.tmp, "ref.png")
         open(self.ref, "wb").write(b"\x89PNG")
+        self.home = os.path.join(self.tmp, "codex-home")   # вход владельца в Codex и его общие правила
+        os.makedirs(self.home)
+        open(os.path.join(self.home, "auth.json"), "w").write("login")
+        open(os.path.join(self.home, "AGENTS.md"), "w").write("Foundation: require skills")
 
-    def run_script(self, *args, fail=False, say=None):
-        env = {**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log,
+    def run_script(self, *args, fail=False, say=None, env=None):
+        env = {**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log, "CODEX_HOME": self.home,
+               "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso"), **(env or {}),
                **({"FAKE_FAIL": fail if isinstance(fail, str) else "ERROR: boom"} if fail else {}),
                **({"FAKE_SAY": say} if say else {})}
         return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=env, timeout=30)
@@ -67,6 +76,20 @@ class Script(unittest.TestCase):
         self.assertIn("glossy red apple on white", a[-1])                    # промпт — как дала сессия
         self.assertEqual(a[-2], "--")                                        # -i не съедает промпт
         self.assertEqual(call["stdin"], "")                                  # stdin закрыт: codex не ждёт EOF
+
+    @unittest.skipIf(os.name == "nt", "ссылки на Windows — с правами администратора; там codex идёт со своим домом")
+    def test_codex_runs_without_the_owners_agents_md_but_with_his_login(self):
+        """09.10: codex отказывался сохранять картинку — общий ~/.codex/AGENTS.md требовал скиллы Foundation. Генерация
+        идёт в своём CODEX_HOME: вход — ссылкой на auth.json владельца, правил нет. Обновил вход — уходит владельцу."""
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_REFRESH": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        home = json.load(open(self.log))["home"]
+        self.assertNotEqual(os.path.realpath(home), os.path.realpath(self.home))
+        self.assertFalse(os.path.exists(os.path.join(home, "AGENTS.md")))
+        self.assertTrue(os.path.islink(os.path.join(home, "auth.json")))
+        self.assertEqual(open(os.path.join(self.home, "auth.json")).read(), "fresh")
+        r = self.run_script("--out", self.out, "apple")
+        self.assertEqual(open(os.path.join(home, "auth.json")).read(), "fresh")
 
     def test_existing_files_are_not_overwritten(self):
         os.makedirs(self.out)
