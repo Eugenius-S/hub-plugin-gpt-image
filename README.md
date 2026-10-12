@@ -24,3 +24,5 @@ python3 plugins/gpt-image/bin/gpt-image --out <папка> [-i ref.png …] [--n
 «Настройки» → «Плагины» → «Можно поставить» → gpt-image.
 
 Тесты: `python3 -m unittest discover -s tests`. Код — MIT, значок — логотип OpenAI (Simple Icons, CC0).
+
+Иконка — [3D Fluency](https://icons8.com/icons/3d-fluency) от Icons8.
