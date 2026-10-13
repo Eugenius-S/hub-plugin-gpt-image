@@ -76,6 +76,8 @@ class Script(unittest.TestCase):
         self.assertIn("glossy red apple on white", a[-1])                    # промпт — как дала сессия
         self.assertEqual(a[-2], "--")                                        # -i не съедает промпт
         self.assertEqual(call["stdin"], "")                                  # stdin закрыт: codex не ждёт EOF
+        self.assertEqual(a[a.index("-m") + 1], "gpt-6-luna")                 # модель задана, не на выбор codex
+        self.assertIn("model_reasoning_effort=medium", a)
 
     @unittest.skipIf(os.name == "nt", "ссылки на Windows — с правами администратора; там codex идёт со своим домом")
     def test_codex_runs_without_the_owners_agents_md_but_with_his_login(self):

@@ -21,6 +21,8 @@ import sys
 import tempfile
 
 TIMEOUT = 20 * 60
+MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol)
+EFFORT = "medium"
 
 
 def codex():
@@ -121,7 +123,7 @@ def main():
     files = names(out, a.name, n)
     last = tempfile.NamedTemporaryFile(prefix="gpt-image-", suffix=".txt", delete=False).name
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", out, "-s", "workspace-write", "-o", last,
-           "-c", "model_reasoning_effort=low"]
+           "-m", MODEL, "-c", f"model_reasoning_effort={EFFORT}"]
     for r in refs:
         cmd += ["-i", r]
     cmd += ["--", task(prompt.strip(), files, refs, a.size)]   # -i берёт несколько файлов: без «--» съел бы промпт
