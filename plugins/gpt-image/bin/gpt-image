@@ -14,8 +14,8 @@ Codex генерирует своим инструментом image_generation 
 картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
 Итог — последняя строка JSON: {"files": [...]} (и "failed": [{"name", "reason"}], если часть не вышла). Codex — из GPT_IMAGE_CODEX, PATH или ~/.local/bin/codex; прокси из
 окружения (HTTPS_PROXY) codex берёт сам. Генерация идёт минуты: сессия запускает это фоном.
-Codex идёт в своём CODEX_HOME (GPT_IMAGE_HOME, по умолчанию ~/.cache/gpt-image/codex-home): вход — ссылкой на auth.json
-владельца, его общие правила (~/.codex/AGENTS.md) и плагины Codex генерации не мешают.
+Каждый запуск codex — в своём CODEX_HOME (GPT_IMAGE_HOME/runs/…, по умолчанию ~/.cache/gpt-image/codex-home): вход —
+ссылкой на auth.json владельца, его общие правила (~/.codex/AGENTS.md) не мешают, картинки соседних запусков не видны.
 """
 import argparse
 import json
@@ -47,35 +47,38 @@ def codex():
 
 
 def isolated():
-    """Свой CODEX_HOME для генерации или None (ссылку не сделать — Windows без прав; тогда обычный дом codex).
-    09.10: общий ~/.codex/AGENTS.md требовал скиллы Foundation — codex через раз отказывался сохранять картинку."""
+    """Свой CODEX_HOME на каждый запуск или None (ссылку не сделать — Windows без прав; тогда обычный дом codex).
+    09.10: общий ~/.codex/AGENTS.md требовал скиллы Foundation — codex через раз отказывался сохранять картинку.
+    14.10: дом был один на все запуски — codex искал «свежий PNG» в общей generated_images и при параллельных
+    генерациях из разных сессий клал в папку чужую картинку. Вход — ссылкой на auth.json владельца."""
     real = os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"))
     auth = os.path.join(real, "auth.json")
-    home = os.path.abspath(os.path.expanduser(os.environ.get("GPT_IMAGE_HOME") or "~/.cache/gpt-image/codex-home"))
-    if not os.path.isfile(auth) or home == real:
+    root = os.path.abspath(os.path.expanduser(os.environ.get("GPT_IMAGE_HOME") or "~/.cache/gpt-image/codex-home"))
+    if not os.path.isfile(auth) or root == real:
         return None
     try:
-        os.makedirs(home, mode=0o700, exist_ok=True)
-        link = os.path.join(home, "auth.json")
-        if not os.path.islink(link):
-            if os.path.exists(link):
-                os.remove(link)
-            os.symlink(auth, link)
-        if not os.path.exists(os.path.join(home, "config.toml")):
-            open(os.path.join(home, "config.toml"), "w").close()
+        runs = os.path.join(root, "runs")
+        os.makedirs(runs, mode=0o700, exist_ok=True)
+        home = tempfile.mkdtemp(prefix="run-", dir=runs)
+        os.symlink(auth, os.path.join(home, "auth.json"))
+        open(os.path.join(home, "config.toml"), "w").close()
     except OSError:
         return None
     return home
 
 
+SETTLE = threading.Lock()
+
+
 def settle(home):
-    """Codex обновил вход и записал auth.json файлом вместо ссылки — свежий вход отдать владельцу, ссылку вернуть:
-    иначе у его codex остался бы старый, уже отозванный токен."""
+    """Codex обновил вход и записал auth.json файлом вместо ссылки — свежий вход отдать владельцу:
+    иначе у его codex остался бы старый, уже отозванный токен. Дом запуска — убрать."""
     link = os.path.join(home, "auth.json")
-    if os.path.isfile(link) and not os.path.islink(link):
-        real = os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")), "auth.json")
-        os.replace(link, real)
-        os.symlink(real, link)
+    with SETTLE:
+        if os.path.isfile(link) and not os.path.islink(link):
+            real = os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")), "auth.json")
+            os.replace(link, real)
+    shutil.rmtree(home, ignore_errors=True)
 
 
 def names(out, base, n, taken):
@@ -115,7 +118,7 @@ def reason(r, said):
     return text[:600]
 
 
-def run(job, out, home):
+def run(job, out):
     """Один запуск codex — одна картинка. -> (файл или None, почему нет)."""
     last = tempfile.NamedTemporaryFile(prefix="gpt-image-", suffix=".txt", delete=False).name
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", out, "-s", "workspace-write", "-o", last,
@@ -123,11 +126,15 @@ def run(job, out, home):
     for r in job["refs"]:
         cmd += ["-i", r]
     cmd += ["--", task(job["prompt"], [job["file"]], job["refs"], job["size"])]   # -i берёт несколько: без «--» съел бы промпт
+    home = isolated()
     env = {**os.environ, "CODEX_HOME": home} if home else None
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         r = None
+    finally:
+        if home:
+            settle(home)
     said = ""
     try:
         with open(last, encoding="utf-8") as f:
@@ -139,13 +146,13 @@ def run(job, out, home):
     return (path, "") if os.path.isfile(path) else (None, reason(r, said))
 
 
-def generate(jobs, out, home, width):
+def generate(jobs, out, width):
     """Все картинки, по width сразу. Упор в лимит — недоделанные по одной после паузы; снова лимит — стоп."""
     done = {}
     lock = threading.Lock()
 
     def one(i):
-        got = run(jobs[i], out, home)
+        got = run(jobs[i], out)
         with lock:
             done[i] = got
 
@@ -158,7 +165,7 @@ def generate(jobs, out, home, width):
     if again and width > 1:
         time.sleep(float(os.environ.get("GPT_IMAGE_PAUSE", PAUSE)))
         for n, i in enumerate(again):
-            done[i] = run(jobs[i], out, home)
+            done[i] = run(jobs[i], out)
             if not done[i][0] and LIMIT.search(done[i][1]):
                 for rest in again[n + 1:]:
                     done[rest] = (None, done[i][1])
@@ -212,12 +219,7 @@ def main():
         jobs += [{"prompt": prompt, "refs": refs, "size": it.get("size") or a.size, "file": f}
                  for f in names(out, it.get("name") or "image", n, taken)]
     os.makedirs(out, exist_ok=True)
-    home = isolated()
-    try:
-        got = generate(jobs, out, home, max(1, min(MAX_JOBS, a.jobs, len(jobs))))
-    finally:
-        if home:
-            settle(home)
+    got = generate(jobs, out, max(1, min(MAX_JOBS, a.jobs, len(jobs))))
     made = [path for path, _ in got if path]
     failed = [{"name": j["file"], "reason": why} for j, (path, why) in zip(jobs, got) if not path]
     if not made:

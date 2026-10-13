@@ -18,7 +18,9 @@ SCRIPT = os.path.join(REPO, "plugins", "gpt-image", "bin", "gpt-image")
 FAKE = """#!/usr/bin/env python3
 import json, os, re, sys, time
 a = sys.argv[1:]
-call = {"args": a, "stdin": sys.stdin.read(), "home": os.environ.get("CODEX_HOME")}
+h = os.environ.get("CODEX_HOME")
+call = {"args": a, "stdin": sys.stdin.read(), "home": h, "link": os.path.islink(os.path.join(h, "auth.json")),
+        "agents": os.path.exists(os.path.join(h, "AGENTS.md"))}
 with open(os.environ["FAKE_LOG"], "w") as f:
     json.dump(call, f)
 with open(os.environ["FAKE_LOG"] + ".all", "a") as f:   # все запуски, по строке
@@ -103,13 +105,21 @@ class Script(unittest.TestCase):
         идёт в своём CODEX_HOME: вход — ссылкой на auth.json владельца, правил нет. Обновил вход — уходит владельцу."""
         r = self.run_script("--out", self.out, "apple", env={"FAKE_REFRESH": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        home = json.load(open(self.log))["home"]
-        self.assertNotEqual(os.path.realpath(home), os.path.realpath(self.home))
-        self.assertFalse(os.path.exists(os.path.join(home, "AGENTS.md")))
-        self.assertTrue(os.path.islink(os.path.join(home, "auth.json")))
+        call = json.load(open(self.log))
+        self.assertNotEqual(os.path.realpath(call["home"]), os.path.realpath(self.home))
+        self.assertFalse(call["agents"])
+        self.assertTrue(call["link"])
         self.assertEqual(open(os.path.join(self.home, "auth.json")).read(), "fresh")
-        r = self.run_script("--out", self.out, "apple")
-        self.assertEqual(open(os.path.join(home, "auth.json")).read(), "fresh")
+
+    def test_each_run_has_its_own_home_and_it_is_cleaned_up(self):
+        # 14.10 (generated-styles): дом codex был общий — при генерациях из двух сессий разом codex брал самый свежий
+        # PNG из общей generated_images, и в папку ложилась чужая картинка (корзина вместо ручек)
+        r = self.run_script("--out", self.out, "--n", "3", "x", env={"FAKE_SLEEP": "0.5"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        homes = {c["home"] for c in self.calls()}
+        self.assertEqual(len(homes), 3)
+        self.assertFalse(any(os.path.exists(h) for h in homes))           # за собой убрал
+        self.assertTrue(all(c["link"] for c in self.calls()))
 
     def fresh(self):
         for f in os.listdir(self.tmp):
