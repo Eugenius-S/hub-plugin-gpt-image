@@ -51,8 +51,15 @@ if os.environ.get("FAKE_SAY"):            # codex дошёл до конца, н
 if os.environ.get("FAKE_FAIL"):
     sys.stderr.write("[2026-10-07T12:00:00] codex\\nthinking...\\n" + os.environ["FAKE_FAIL"] + "\\ntokens used\\n1 234\\n")
     sys.exit(1)
-for n in names:
-    open(os.path.join(cd, n), "wb").write(b"\\x89PNG\\r\\n\\x1a\\n")
+gen = os.path.join(h, "generated_images", f"t{seen}")   # инструмент картинок кладёт результат в свой дом
+os.makedirs(gen, exist_ok=True)
+for k, n in enumerate(names):
+    mine = b"\\x89PNG\\r\\n\\x1a\\n" + f"run{seen}:{n}".encode()
+    if not os.environ.get("FAKE_NOGEN"):
+        open(os.path.join(gen, f"ig_{k}.png"), "wb").write(mine)
+    # а в папку копирует модель — чем найдёт: чужой «свежий PNG», недописанный файл
+    took = {"STEAL": b"\\x89PNG foreign", "EMPTY": b""}.get(os.environ.get("FAKE_COPY", ""), mine)
+    open(os.path.join(cd, n), "wb").write(took)
 open(a[a.index("-o") + 1], "w").write("ok")
 """
 
@@ -120,6 +127,22 @@ class Script(unittest.TestCase):
         self.assertEqual(len(homes), 3)
         self.assertFalse(any(os.path.exists(h) for h in homes))           # за собой убрал
         self.assertTrue(all(c["link"] for c in self.calls()))
+
+    def test_the_image_in_the_folder_is_the_one_this_run_made(self):
+        # 13.10 (gen-y2k, 4 потока): в папку картинку копировала модель — «свежий PNG» где нашла: чужая картинка (ручки
+        # вместо искр) или файл, который ещё пишется (0 байт). Кладёт скрипт — из дома этого запуска, целиком
+        for copy in ("STEAL", "EMPTY"):
+            r = self.run_script("--out", self.out, "--n", "2", "--name", copy.lower(), "x", env={"FAKE_COPY": copy})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for p in json.loads(r.stdout.strip().splitlines()[-1])["files"]:
+                got = open(p, "rb").read()
+                self.assertTrue(got.startswith(b"\x89PNG\r\n\x1a\nrun"), (copy, got))
+                self.assertTrue(got.endswith(os.path.basename(p).encode()), (copy, got))
+        self.assertFalse([f for f in os.listdir(self.out) if f.endswith(".part")])
+        # своей картинки нет, а модель что-то положила — не отдавать чужое
+        r = self.run_script("--out", self.out, "--name", "none", "x", env={"FAKE_NOGEN": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "none-1.png")))
 
     def fresh(self):
         for f in os.listdir(self.tmp):

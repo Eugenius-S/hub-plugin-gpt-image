@@ -81,6 +81,26 @@ def settle(home):
     shutil.rmtree(home, ignore_errors=True)
 
 
+def take(home, path):
+    """Картинку в папку кладёт скрипт, а не модель: её копия бралась «свежим PNG» где попало — при параллельных
+    прогонах чужая картинка или файл, который ещё пишется (13.10: ручки вместо искр, 0 байт). Своя — только в доме
+    этого запуска; нет её — нет и картинки."""
+    own = []
+    for root, dirs, files in os.walk(home):
+        dirs[:] = [d for d in dirs if d not in ("skills", "plugins")]   # значки встроенных скиллов — не результат
+        for f in files:
+            p = os.path.join(root, f)
+            if f.lower().endswith(".png") and os.path.getsize(p):
+                own.append((os.path.getmtime(p), p))
+    if not own:
+        if os.path.exists(path):
+            os.remove(path)   # модель что-то положила, а своей картинки нет — значит, не наша
+        return
+    tmp = path + ".part"
+    shutil.copyfile(max(own)[1], tmp)
+    os.replace(tmp, path)   # целиком и сразу: читающий не застанет полфайла
+
+
 def names(out, base, n, taken):
     got, i = [], 1
     while len(got) < n:
@@ -128,8 +148,11 @@ def run(job, out):
     cmd += ["--", task(job["prompt"], [job["file"]], job["refs"], job["size"])]   # -i берёт несколько: без «--» съел бы промпт
     home = isolated()
     env = {**os.environ, "CODEX_HOME": home} if home else None
+    path = os.path.join(out, job["file"])
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT, env=env)
+        if home:
+            take(home, path)
     except subprocess.TimeoutExpired:
         r = None
     finally:
@@ -142,8 +165,7 @@ def run(job, out):
         os.remove(last)
     except OSError:
         pass
-    path = os.path.join(out, job["file"])
-    return (path, "") if os.path.isfile(path) else (None, reason(r, said))
+    return (path, "") if os.path.isfile(path) and os.path.getsize(path) else (None, reason(r, said))
 
 
 def generate(jobs, out, width):
