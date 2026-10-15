@@ -250,6 +250,64 @@ class Script(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("content policy", r.stderr)
 
+    def test_a_second_run_into_a_busy_folder_stops_at_once(self):
+        # 15.10: четыре копии одной пачки в одну папку — каждая в 4 раза дольше; второй запуск не стартует
+        first = subprocess.Popen([sys.executable, SCRIPT, "--out", self.out, "x"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env={**os.environ, "GPT_IMAGE_CODEX": self.codex,
+                                 "FAKE_LOG": self.log, "CODEX_HOME": self.home, "FAKE_SLEEP": "5",
+                                 "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso")})
+        try:
+            lock = os.path.join(self.out, ".gpt-image.lock")
+            end = time.time() + 10
+            while not os.path.exists(self.log + ".all") and time.time() < end:   # первый уже в codex
+                time.sleep(0.05)
+            r = self.run_script("--out", self.out, "x")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(f"уже идёт генерация (pid {first.pid} с ", r.stderr)
+            self.assertIn("дождись её или останови", r.stderr)
+            self.assertEqual(len(self.calls()), 1)                          # второй codex не звали
+        finally:
+            first.wait(timeout=30)
+        self.assertFalse(os.path.exists(lock))                              # первый закончил — замок снят
+        r = self.run_script("--out", self.out, "x")                         # и папка снова свободна
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_dead_lock_is_taken_over(self):
+        os.makedirs(self.out)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        open(os.path.join(self.out, ".gpt-image.lock"), "w").write(f"{dead.pid} 1\n")
+        r = self.run_script("--out", self.out, "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.out, ".gpt-image.lock")))
+        open(os.path.join(self.out, ".gpt-image.lock"), "w").write("мусор")   # битый замок — тоже не держит
+        r = self.run_script("--out", self.out, "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_lock_is_released_after_a_failure(self):
+        r = self.run_script("--out", self.out, "x", fail=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.out, ".gpt-image.lock")))
+
+    def test_each_ready_image_prints_a_progress_line(self):
+        r = self.run_script("--out", self.out, "--n", "3", "--name", "p", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [x for x in r.stderr.splitlines() if x.startswith("готово ")]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(sorted(x.split(":")[0] for x in lines), ["готово 1/3", "готово 2/3", "готово 3/3"])
+        self.assertEqual(sorted(x.split(": ")[1] for x in lines), ["p-1.png", "p-2.png", "p-3.png"])
+        self.fresh()
+        r = self.run_script("--out", self.out, "--jobs", "1", "x", env={"FAKE_LIMIT_FIRST": "1"})   # после повтора тоже
+        self.assertIn("готово 1/1: image-1.png", r.stderr)
+
+    def test_one_image_is_limited_to_seven_minutes(self):
+        self.assertEqual(subprocess.run([sys.executable, "-c", f"import runpy;print(runpy.run_path({SCRIPT!r}, "
+                                         "run_name='x')['TIMEOUT'])"], capture_output=True, text=True).stdout.strip(),
+                         "420")
+        r = self.run_script("--out", self.out, "x", env={"GPT_IMAGE_TIMEOUT": "1", "FAKE_SLEEP": "20"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("не уложился", r.stderr)
+
     def test_missing_reference_fails_fast(self):
         r = self.run_script("--out", self.out, "-i", os.path.join(self.tmp, "nope.png"), "x")
         self.assertNotEqual(r.returncode, 0)

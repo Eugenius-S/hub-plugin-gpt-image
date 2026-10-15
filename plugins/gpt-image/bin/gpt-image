@@ -11,6 +11,10 @@
 по одной, до 3 раз (GPT_IMAGE_TRIES) через 2 мин (GPT_IMAGE_PAUSE, с), и при --jobs 1 тоже; перед паузой в stderr строка
 «лимит GPT: повтор i/3 через 2 мин». Не прошло — в "failed" с текстом ошибки (время снятия лимита в нём же).
 
+Рестрикты (15.10: 4 копии одной пачки в одну папку — каждая в 4 раза дольше): в папке --out идёт одна генерация — второй
+запуск в ту же папку, пока первый жив, сразу выходит с кодом 1 (замок — файл .gpt-image.lock с pid, мёртвый замок снимается);
+одна картинка — не дольше 7 мин (GPT_IMAGE_TIMEOUT, с), иначе в "failed"; каждая готовая — строка «готово i/N: файл» в stderr.
+
 Codex генерирует своим инструментом image_generation по подписке ChatGPT (вход — `codex login`, ключ API не нужен),
 картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
 Итог — последняя строка JSON: {"files": [...]} (и "failed": [{"name", "reason"}], если часть не вышла). Codex — из GPT_IMAGE_CODEX, PATH или ~/.local/bin/codex; прокси из
@@ -30,7 +34,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-TIMEOUT = 20 * 60
+TIMEOUT = 7 * 60        # с на одну картинку: правило хаба «дольше 7 мин — разбираться» (было 20 мин)
+LOCK = ".gpt-image.lock"
 MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol)
 EFFORT = "medium"
 JOBS, MAX_JOBS = 3, 4   # codex сразу: подписка ChatGPT держит несколько генераций; больше — чаще упор в лимит
@@ -67,6 +72,61 @@ def isolated():
     except OSError:
         return None
     return home
+
+
+def alive(pid):
+    """Процесс с таким pid жив? Не os.kill(pid, 0): на Windows он завершает процесс."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.OpenProcess.restype = ctypes.c_void_p
+        h = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k.GetLastError() == 5        # доступ закрыт — процесс есть
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code))
+        k.CloseHandle(ctypes.c_void_p(h))
+        return bool(ok) and code.value == 259   # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def lock(out):
+    """Замок на папку: файл с pid и временем старта. Занят живым — выход; мёртвый (сессию убили) — снять и взять."""
+    path = os.path.join(out, LOCK)
+    for _ in range(5):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    pid, started = (f.read().split() + ["0", "0"])[:2]
+                pid, started = int(pid), float(started)
+            except (OSError, ValueError):
+                pid, started = 0, 0
+            if alive(pid):
+                at = time.strftime("%H:%M", time.localtime(started)) if started else "?"
+                sys.exit(f"gpt-image: в {out} уже идёт генерация (pid {pid} с {at}) — дождись её или останови")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {time.time():.0f}\n")
+        return path
+    sys.exit(f"gpt-image: не удалось взять замок {path}")
+
+
+def timeout():
+    return float(os.environ.get("GPT_IMAGE_TIMEOUT", TIMEOUT))
 
 
 SETTLE = threading.Lock()
@@ -131,7 +191,8 @@ def reason(r, said):
     """Почему нет картинок (07.10: было только «не получилось»): истекло время; строки ошибок из вывода codex (лимит
     подписки, вход, сеть и прокси); его последнее сообщение; иначе код выхода."""
     if r is None:
-        return f"codex не уложился в {TIMEOUT // 60} мин"
+        t = timeout()
+        return f"codex не уложился в {round(t / 60)} мин" if t >= 60 else f"codex не уложился в {round(t)} с"
     errors = [x.strip() for x in (r.stderr or "").splitlines()
               if re.search(r"error|limit|unauthori|forbidden|refus|denied|polic|proxy|connect|timed? ?out|429|403|401",
                            x, re.I)]
@@ -152,7 +213,7 @@ def run(job, out):
     env = {**os.environ, "CODEX_HOME": home} if home else None
     path = os.path.join(out, job["file"])
     try:
-        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT, env=env)
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout(), env=env)
         if home:
             take(home, path)
     except subprocess.TimeoutExpired:
@@ -175,10 +236,17 @@ def generate(jobs, out, width):
     done = {}
     lock = threading.Lock()
 
+    def ready(got):
+        """Ход для сторожа хаба: строка на каждую готовую картинку (звать под lock)."""
+        if got[0]:
+            n = sum(1 for p, _ in done.values() if p)
+            print(f"готово {n}/{len(jobs)}: {os.path.basename(got[0])}", file=sys.stderr, flush=True)
+
     def one(i):
         got = run(jobs[i], out)
         with lock:
             done[i] = got
+            ready(got)
 
     with ThreadPoolExecutor(max_workers=width) as pool:
         for k in range(len(jobs)):
@@ -196,6 +264,7 @@ def generate(jobs, out, width):
         time.sleep(pause)
         for n, i in enumerate(again):
             done[i] = run(jobs[i], out)
+            ready(done[i])
             if not done[i][0] and LIMIT.search(done[i][1]):   # снова лимит — остальным в этом круге не пробовать
                 for rest in again[n + 1:]:
                     done[rest] = (None, done[i][1])
@@ -238,18 +307,27 @@ def main():
         items = [{"prompt": a.prompt, "prompt_file": a.prompt_file, "images": a.image, "n": a.n, "name": a.name,
                   "size": a.size}]
     out = os.path.abspath(os.path.expanduser(a.out))
-    jobs, taken = [], set()
+    parsed = []
     for it in items:
         prompt = read_prompt(it.get("prompt"), it.get("prompt_file") and where(it["prompt_file"], base))
         refs = [where(r, base) for r in it.get("images") or []]
         missing = [r for r in refs if not os.path.isfile(r)]
         if missing:
             sys.exit("gpt-image: нет референса: " + ", ".join(missing))
-        n = max(1, min(4, int(it.get("n") or 1)))
-        jobs += [{"prompt": prompt, "refs": refs, "size": it.get("size") or a.size, "file": f}
-                 for f in names(out, it.get("name") or "image", n, taken)]
+        parsed.append((prompt, refs, it.get("size") or a.size, it.get("name") or "image",
+                       max(1, min(4, int(it.get("n") or 1)))))
     os.makedirs(out, exist_ok=True)
-    got = generate(jobs, out, max(1, min(MAX_JOBS, a.jobs, len(jobs))))
+    held = lock(out)   # имена файлов берём уже под замком: параллельный запуск не займёт те же
+    try:
+        jobs, taken = [], set()
+        for prompt, refs, size, name, n in parsed:
+            jobs += [{"prompt": prompt, "refs": refs, "size": size, "file": f} for f in names(out, name, n, taken)]
+        got = generate(jobs, out, max(1, min(MAX_JOBS, a.jobs, len(jobs))))
+    finally:
+        try:
+            os.remove(held)
+        except OSError:
+            pass
     made = [path for path, _ in got if path]
     failed = [{"name": j["file"], "reason": why} for j, (path, why) in zip(jobs, got) if not path]
     if not made:
