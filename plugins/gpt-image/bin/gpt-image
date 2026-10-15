@@ -7,8 +7,9 @@
 
 Картинки идут параллельно, по --jobs codex сразу (по умолчанию 3; владелец 13.10: кадр 1–3.5 мин, пачка из 10 по одному —
 25 мин): --n 4 — четыре запуска codex, --batch — список картинок со своими промптами, образцами и именами
-([{"prompt" | "prompt_file", "name", "images": [...], "size", "n"}]). Упёрлись в лимит подписки ChatGPT — недоделанные
-ещё раз по одной, снова лимит — остальные не трогаем, причина в итоге.
+([{"prompt" | "prompt_file", "name", "images": [...], "size", "n"}]). Упёрлись в лимит ChatGPT — недоделанные
+по одной, до 3 раз (GPT_IMAGE_TRIES) через 2 мин (GPT_IMAGE_PAUSE, с), и при --jobs 1 тоже; перед паузой в stderr строка
+«лимит GPT: повтор i/3 через 2 мин». Не прошло — в "failed" с текстом ошибки (время снятия лимита в нём же).
 
 Codex генерирует своим инструментом image_generation по подписке ChatGPT (вход — `codex login`, ключ API не нужен),
 картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
@@ -34,7 +35,8 @@ MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (с�
 EFFORT = "medium"
 JOBS, MAX_JOBS = 3, 4   # codex сразу: подписка ChatGPT держит несколько генераций; больше — чаще упор в лимит
 STAGGER = 3             # с между запусками: codex обновляет вход при старте — не все разом
-PAUSE = 20              # с после упора в лимит — перед повтором по одной
+PAUSE = 120             # с после упора в лимит — перед каждым повтором по одной (владелец 15.10: лимит GPT на
+TRIES = 3               # одновременные генерации снимается через пару минут); повторов не больше TRIES, и при --jobs 1
 # 13.10: посреди пачки вход Codex сменили на другой аккаунт — у идущих «token could not be refreshed»; повтор берёт новый
 LIMIT = re.compile(r"usage limit|rate.?limit|too many requests|429|quota|could not be refreshed", re.I)
 
@@ -183,12 +185,18 @@ def generate(jobs, out, width):
             if k and k < width:
                 time.sleep(float(os.environ.get("GPT_IMAGE_STAGGER", STAGGER)))
             pool.submit(one, k)
-    again = [i for i, (path, why) in sorted(done.items()) if not path and LIMIT.search(why)]
-    if again and width > 1:
-        time.sleep(float(os.environ.get("GPT_IMAGE_PAUSE", PAUSE)))
+    pause = float(os.environ.get("GPT_IMAGE_PAUSE", PAUSE))
+    tries = int(os.environ.get("GPT_IMAGE_TRIES", TRIES))
+    for attempt in range(1, tries + 1):
+        again = [i for i, (path, why) in sorted(done.items()) if not path and LIMIT.search(why)]
+        if not again:
+            break
+        wait = f"{round(pause / 60)} мин" if pause >= 60 else f"{round(pause)} с"
+        print(f"лимит GPT: повтор {attempt}/{tries} через {wait}", file=sys.stderr, flush=True)
+        time.sleep(pause)
         for n, i in enumerate(again):
             done[i] = run(jobs[i], out)
-            if not done[i][0] and LIMIT.search(done[i][1]):
+            if not done[i][0] and LIMIT.search(done[i][1]):   # снова лимит — остальным в этом круге не пробовать
                 for rest in again[n + 1:]:
                     done[rest] = (None, done[i][1])
                 break

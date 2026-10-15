@@ -197,14 +197,36 @@ class Script(unittest.TestCase):
         r = self.run_script("--out", self.out, "--n", "3", "x", fail="ERROR: You've hit your usage limit. Try again at 13:40.")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("usage limit", r.stderr)
-        self.assertEqual(len(self.calls()), 4)                               # три разом и одна проба, не ещё две
+        self.assertEqual(len(self.calls()), 6)                               # три разом и по одной пробе в 3 повторах
+        self.assertEqual(r.stderr.count("лимит GPT: повтор"), 3)
         self.fresh()
         r = self.run_script("--out", self.out, "--n", "3", "--name", "p", "x", env={"FAKE_LIMIT_FROM": "2"})
         res = json.loads(r.stdout.strip().splitlines()[-1])                 # часть вышла — итог с недоделанным
         self.assertEqual(len(res["files"]), 1)
         self.assertEqual(len(res["failed"]), 2)                              # какие — как разошлись запуски
         self.assertIn("usage limit", res["failed"][1]["reason"])
-        self.assertEqual(len(self.calls()), 4)
+        self.assertEqual(len(self.calls()), 6)                               # лимит с 2-го запуска: три разом, пробы по одной ×3
+
+    def test_one_job_retries_on_the_limit_too(self):
+        # 15.10: лимит GPT на одновременные генерации — повтор и при --jobs 1, и при одной картинке; строка хода перед паузой
+        r = self.run_script("--out", self.out, "--jobs", "1", "x", env={"FAKE_LIMIT_FIRST": "2"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(json.loads(r.stdout.strip().splitlines()[-1])["files"]), 1)
+        self.assertEqual(len(self.calls()), 3)
+        self.assertIn("лимит GPT: повтор 1/3 через 0 с", r.stderr)
+        self.assertIn("лимит GPT: повтор 2/3", r.stderr)
+        self.assertNotIn("повтор 3/3", r.stderr)
+
+    def test_tries_and_pause_come_from_the_environment(self):
+        r = self.run_script("--out", self.out, "--jobs", "1", "x", env={"GPT_IMAGE_TRIES": "1", "FAKE_LIMIT_FROM": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("повтор 1/1", r.stderr)
+        self.fresh()
+        t = time.time()
+        r = self.run_script("--out", self.out, "x", env={"GPT_IMAGE_PAUSE": "120", "GPT_IMAGE_TRIES": "0", "FAKE_LIMIT_FROM": "1"})
+        self.assertLess(time.time() - t, 10)                                  # 0 повторов — без пауз
+        self.assertEqual(len(self.calls()), 1)
 
     def test_existing_files_are_not_overwritten(self):
         os.makedirs(self.out)
