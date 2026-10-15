@@ -15,6 +15,12 @@
 запуск в ту же папку, пока первый жив, сразу выходит с кодом 1 (замок — файл .gpt-image.lock с pid, мёртвый замок снимается);
 одна картинка — не дольше 7 мин (GPT_IMAGE_TIMEOUT, с), иначе в "failed"; каждая готовая — строка «готово i/N: файл» в stderr.
 
+Занятость GPT — одна на всех (владелец 15.10: сессии простаивали, не зная, свободен ли GPT): каждый запуск codex занимает
+место (GPT_IMAGE_SLOTS, по умолчанию 4) в общей папке GPT_IMAGE_HOME/busy, упор в лимит ставит паузу для всех
+(кулдаун до ЧЧ:ММ:СС). Мест нет или пауза — запуск ждёт своей очереди со строкой «жду GPT: …» в stderr, не долбит лимит.
+`gpt-image --status` — «GPT свободен: k из N мест» (код 0) или «GPT занят до ЧЧ:ММ:СС: кем» (код 2): свободен —
+шли следующий кадр сразу, не жди.
+
 Codex генерирует своим инструментом image_generation по подписке ChatGPT (вход — `codex login`, ключ API не нужен),
 картинки уходят в OpenAI. Файлы — <имя>-1.png, <имя>-2.png… (занятые номера пропускаются, старое не затирается).
 Итог — последняя строка JSON: {"files": [...]} (и "failed": [{"name", "reason"}], если часть не вышла). Codex — из GPT_IMAGE_CODEX, PATH или ~/.local/bin/codex; прокси из
@@ -43,6 +49,9 @@ STAGGER = 3             # с между запусками: codex обновля
 PAUSE = 120             # с после упора в лимит — перед каждым повтором по одной (владелец 15.10: лимит GPT на
 TRIES = 3               # одновременные генерации снимается через пару минут); повторов не больше TRIES, и при --jobs 1
 # 13.10: посреди пачки вход Codex сменили на другой аккаунт — у идущих «token could not be refreshed»; повтор берёт новый
+SLOTS = 4               # мест GPT на всех сразу: общий лимит подписки ChatGPT на одновременные генерации
+TYPICAL = 180           # с на кадр — для «занят до»: кадр 1–3.5 мин (13.10)
+POLL = 5                # с между проверками свободного места
 LIMIT = re.compile(r"usage limit|rate.?limit|too many requests|429|quota|could not be refreshed", re.I)
 
 
@@ -123,6 +132,114 @@ def lock(out):
             f.write(f"{os.getpid()} {time.time():.0f}\n")
         return path
     sys.exit(f"gpt-image: не удалось взять замок {path}")
+
+
+def busy_dir():
+    root = os.path.abspath(os.path.expanduser(os.environ.get("GPT_IMAGE_HOME") or "~/.cache/gpt-image/codex-home"))
+    d = os.path.join(root, "busy")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def slots():
+    return max(1, int(os.environ.get("GPT_IMAGE_SLOTS", SLOTS)))
+
+
+def who():
+    return os.environ.get("HUB_SESSION") or f"pid {os.getpid()}"
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def taken_slots():
+    """Занятые места живыми запусками: [(место, {pid, who, started, out})]; места умерших (сессию убили) — снять."""
+    d, got = busy_dir(), []
+    for k in range(slots()):
+        p = os.path.join(d, f"slot-{k}.json")
+        if not os.path.exists(p):
+            continue
+        it = _read(p)
+        if it and alive(int(it.get("pid") or 0)):
+            got.append((k, it))
+        elif it is not None or time.time() - os.path.getmtime(p) > 10:   # пустой — ещё пишется: не трогать
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    return got
+
+
+def cooldown():
+    """Пауза для всех после упора в лимит: {until, who} или None, если прошла."""
+    it = _read(os.path.join(busy_dir(), "cooldown.json"))
+    return it if it and float(it.get("until") or 0) > time.time() else None
+
+
+def set_cooldown(seconds):
+    if seconds <= 0:
+        return
+    p = os.path.join(busy_dir(), "cooldown.json")
+    until = time.time() + seconds
+    old = cooldown()
+    if old and float(old["until"]) >= until:
+        return
+    tmp = f"{p}.{os.getpid()}.{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"until": until, "who": who()}, f, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def hhmmss(t):
+    return time.strftime("%H:%M:%S", time.localtime(t))
+
+
+def status():
+    """-> (свободен?, строка): «GPT свободен: k из N мест» или «GPT занят до ЧЧ:ММ:СС: кем»."""
+    cd = cooldown()
+    if cd:
+        return False, f"GPT занят до {hhmmss(float(cd['until']))}: лимит подписки (упёрся {cd.get('who') or '?'})"
+    busy, n = taken_slots(), slots()
+    if len(busy) < n:
+        return True, f"GPT свободен: {n - len(busy)} из {n} мест" + (
+            " (заняты: " + ", ".join(sorted({it.get("who") or "?" for _, it in busy})) + ")" if busy else "")
+    soon = min(float(it.get("started") or 0) for _, it in busy) + TYPICAL
+    names = ", ".join(sorted({it.get("who") or "?" for _, it in busy}))
+    return False, f"GPT занят до ~{hhmmss(max(soon, time.time() + POLL))}: {n} из {n} мест — {names}"
+
+
+def take_slot(out):
+    """Место GPT на один запуск codex: свободное — сразу, нет — ждать (строка «жду GPT» раз в минуту). -> путь места."""
+    d, told = busy_dir(), 0.0
+    while True:
+        if not cooldown():
+            taken_slots()   # снять места умерших
+            for k in range(slots()):
+                p = os.path.join(d, f"slot-{k}.json")
+                try:
+                    fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    continue
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({"pid": os.getpid(), "who": who(), "started": time.time(), "out": out}, f,
+                              ensure_ascii=False)
+                return p
+        if time.time() - told >= 60:
+            print(f"жду GPT: {status()[1]}", file=sys.stderr, flush=True)
+            told = time.time()
+        time.sleep(float(os.environ.get("GPT_IMAGE_POLL", POLL)))
+
+
+def free_slot(p):
+    try:
+        os.remove(p)
+    except OSError:
+        pass
 
 
 def timeout():
@@ -212,6 +329,7 @@ def run(job, out):
     home = isolated()
     env = {**os.environ, "CODEX_HOME": home} if home else None
     path = os.path.join(out, job["file"])
+    slot = take_slot(out)
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout(), env=env)
         if home:
@@ -219,6 +337,7 @@ def run(job, out):
     except subprocess.TimeoutExpired:
         r = None
     finally:
+        free_slot(slot)
         if home:
             settle(home)
     said = ""
@@ -228,7 +347,12 @@ def run(job, out):
         os.remove(last)
     except OSError:
         pass
-    return (path, "") if os.path.isfile(path) and os.path.getsize(path) else (None, reason(r, said))
+    if os.path.isfile(path) and os.path.getsize(path):
+        return path, ""
+    why = reason(r, said)
+    if LIMIT.search(why):   # лимит — пауза для всех: другие сессии не долбят его, а ждут
+        set_cooldown(float(os.environ.get("GPT_IMAGE_PAUSE", PAUSE)))
+    return None, why
 
 
 def generate(jobs, out, width):
@@ -288,7 +412,8 @@ def main():
     ap = argparse.ArgumentParser(prog="gpt-image")
     ap.add_argument("prompt", nargs="?")
     ap.add_argument("--prompt-file")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--status", action="store_true")
     ap.add_argument("-i", "--image", action="append", default=[])
     ap.add_argument("--n", type=int, default=1)
     ap.add_argument("--name", default="image")
@@ -296,6 +421,12 @@ def main():
     ap.add_argument("--batch")
     ap.add_argument("--jobs", type=int, default=JOBS)
     a = ap.parse_args()
+    if a.status:
+        free, line = status()
+        print(line)
+        sys.exit(0 if free else 2)
+    if not a.out:
+        ap.error("нужен --out")
     if a.batch:
         with open(os.path.expanduser(a.batch), encoding="utf-8") as f:
             items = json.load(f)

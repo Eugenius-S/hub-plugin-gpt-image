@@ -308,6 +308,63 @@ class Script(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("не уложился", r.stderr)
 
+    def busy(self, k, pid, who="gen-x", started=None):
+        d = os.path.join(self.tmp, "iso", "busy")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"slot-{k}.json"), "w") as f:
+            json.dump({"pid": pid, "who": who, "started": started or time.time(), "out": "/x"}, f)
+        return os.path.join(d, f"slot-{k}.json")
+
+    def test_status_says_free_or_busy_until_and_by_whom(self):
+        # владелец 15.10: сессии простаивали, не зная, свободен ли GPT — одна команда для всех
+        r = self.run_script("--status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("GPT свободен: 4 из 4 мест", r.stdout)
+        for k in range(2):
+            self.busy(k, os.getpid(), "gen-y2k")
+        r = self.run_script("--status")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("2 из 4 мест (заняты: gen-y2k)", r.stdout)
+        r = self.run_script("--status", env={"GPT_IMAGE_SLOTS": "2"})
+        self.assertEqual(r.returncode, 2)
+        self.assertRegex(r.stdout, r"GPT занят до ~\d\d:\d\d:\d\d: 2 из 2 мест — gen-y2k")
+
+    def test_a_run_waits_while_gpt_is_busy_for_everyone(self):
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(holder.kill)
+        slot = self.busy(0, holder.pid)
+        env = {"GPT_IMAGE_SLOTS": "1", "GPT_IMAGE_POLL": "0.2"}
+        p = subprocess.Popen([sys.executable, SCRIPT, "--out", self.out, "x"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True,
+                             env={**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log,
+                                  "CODEX_HOME": self.home, "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso"),
+                                  "GPT_IMAGE_STAGGER": "0", "GPT_IMAGE_PAUSE": "0", **env})
+        time.sleep(1.5)
+        self.assertIsNone(p.poll())                                          # ждёт места, codex не запущен
+        self.assertFalse(os.path.exists(self.log))
+        os.remove(slot)                                                      # место освободилось
+        out, err = p.communicate(timeout=20)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertIn("жду GPT: GPT занят", err)
+        self.assertEqual(len(json.loads(out.strip().splitlines()[-1])["files"]), 1)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "iso", "busy")), [])   # своё место отдал
+
+    def test_a_dead_runs_place_is_freed(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.busy(0, dead.pid)
+        r = self.run_script("--out", self.out, "x", env={"GPT_IMAGE_SLOTS": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("жду GPT", r.stderr)
+
+    def test_the_limit_pauses_gpt_for_everyone(self):
+        r = self.run_script("--out", self.out, "x", env={"GPT_IMAGE_PAUSE": "60", "GPT_IMAGE_TRIES": "0",
+                                                         "FAKE_LIMIT_FROM": "1", "HUB_SESSION": "gen-a"})
+        self.assertNotEqual(r.returncode, 0)
+        r = self.run_script("--status")
+        self.assertEqual(r.returncode, 2)
+        self.assertRegex(r.stdout, r"GPT занят до \d\d:\d\d:\d\d: лимит подписки \(упёрся gen-a\)")
+
     def test_missing_reference_fails_fast(self):
         r = self.run_script("--out", self.out, "-i", os.path.join(self.tmp, "nope.png"), "x")
         self.assertNotEqual(r.returncode, 0)
