@@ -42,7 +42,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 TIMEOUT = 7 * 60        # с на одну картинку: правило хаба «дольше 7 мин — разбираться» (было 20 мин)
 LOCK = ".gpt-image.lock"
-MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol)
+MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol); GPT_IMAGE_MODEL — своя
+# 16.10, Windows: «The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account» — у входа другие
+# модели; тогда модель из config.toml владельца (с ней работает его codex)
+UNSUPPORTED = re.compile(r"model is not supported|model_not_found|does not exist or you do not have access", re.I)
 EFFORT = "medium"
 JOBS, MAX_JOBS = 3, 4   # codex сразу: подписка ChatGPT держит несколько генераций; больше — чаще упор в лимит
 STAGGER = 3             # с между запусками: codex обновляет вход при старте — не все разом
@@ -318,24 +321,68 @@ def reason(r, said):
     return text[:600]
 
 
+def codex_run(cmd, prompt, env):
+    """codex с промптом на stdin -> CompletedProcess или None (не уложился). Не уложился — гасим всё дерево: на Windows
+    codex — codex.cmd → node, и kill гасил только cmd.exe, а node дорисовывал картинку после срока (16.10)."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         encoding="utf-8", errors="replace", env=env)
+    try:
+        out, err = p.communicate(prompt, timeout=timeout())
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        p.kill()
+        p.communicate()
+        return None
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def owners_model():
+    """Модель из config.toml владельца (`model = "…"`) или None."""
+    path = os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")), "config.toml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'\s*model\s*=\s*"([^"]+)"', line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def models():
+    first = os.environ.get("GPT_IMAGE_MODEL") or MODEL
+    return [first] + [m for m in [owners_model()] if m and m != first]
+
+
 def run(job, out):
+    """Одна картинка: модель скрипта, не принял её вход — модель владельца. -> (файл или None, почему нет)."""
+    for model in models():
+        got = attempt(job, out, model)
+        if got[0] or not UNSUPPORTED.search(got[1]):
+            return got
+    return got
+
+
+def attempt(job, out, model):
     """Один запуск codex — одна картинка. -> (файл или None, почему нет)."""
     last = tempfile.NamedTemporaryFile(prefix="gpt-image-", suffix=".txt", delete=False).name
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", out, "-s", "workspace-write", "-o", last,
-           "-m", MODEL, "-c", f"model_reasoning_effort={EFFORT}"]
+           "-m", model, "-c", f"model_reasoning_effort={EFFORT}"]
     for r in job["refs"]:
         cmd += ["-i", r]
-    cmd += ["--", task(job["prompt"], [job["file"]], job["refs"], job["size"])]   # -i берёт несколько: без «--» съел бы промпт
+    # промпт — через stdin («-»): на Windows codex — обёртка codex.cmd, и cmd.exe обрезал многострочный аргумент на
+    # первом переводе строки (16.10: «no prompt appeared after the colon»); -i берёт несколько — без «--» съел бы «-»
+    cmd += ["--", "-"]
     home = isolated()
     env = {**os.environ, "CODEX_HOME": home} if home else None
     path = os.path.join(out, job["file"])
     slot = take_slot(out)
     try:
-        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout(), env=env)
-        if home:
+        r = codex_run(cmd, task(job["prompt"], [job["file"]], job["refs"], job["size"]), env)
+        if home and r is not None:
             take(home, path)
-    except subprocess.TimeoutExpired:
-        r = None
     finally:
         free_slot(slot)
         if home:

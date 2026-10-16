@@ -42,8 +42,12 @@ if os.environ.get("FAKE_REFRESH"):        # codex обновил вход: за�
     h = os.environ["CODEX_HOME"]
     os.remove(os.path.join(h, "auth.json"))
     open(os.path.join(h, "auth.json"), "w").write("fresh")
+m = a[a.index("-m") + 1] if "-m" in a else None
+if m and m == os.environ.get("FAKE_UNSUPPORTED"):   # модель не для этого входа (вход ChatGPT, 16.10 Windows)
+    sys.stderr.write("ERROR: The " + repr(m) + " model is not supported when using Codex with a ChatGPT account.\\n")
+    sys.exit(1)
 cd = a[a.index("-C") + 1]
-prompt = a[-1]
+prompt = call["stdin"] if a[-1] == "-" else a[-1]
 names = re.findall(r"`([\\w.-]+\\.png)`", prompt)
 if os.environ.get("FAKE_SAY"):            # codex дошёл до конца, но картинку не сделал — сказал почему
     open(a[a.index("-o") + 1], "w").write(os.environ["FAKE_SAY"])
@@ -68,9 +72,13 @@ class Script(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="gpt-image-")
         self.codex = os.path.join(self.tmp, "codex")
-        with open(self.codex, "w") as f:
+        with open(self.codex, "w", encoding="utf-8") as f:
             f.write(FAKE)
         os.chmod(self.codex, os.stat(self.codex).st_mode | stat.S_IEXEC)
+        if os.name == "nt":   # как настоящий codex на Windows — обёртка .cmd: cmd.exe режет аргумент на переводе строки
+            with open(self.codex + ".cmd", "w") as f:
+                f.write(f'@"{sys.executable}" "{self.codex}" %*\r\n')
+            self.codex += ".cmd"
         self.log = os.path.join(self.tmp, "log.json")
         self.out = os.path.join(self.tmp, "out")
         self.ref = os.path.join(self.tmp, "ref.png")
@@ -82,11 +90,11 @@ class Script(unittest.TestCase):
 
     def run_script(self, *args, fail=False, say=None, env=None):
         env = {**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log, "CODEX_HOME": self.home,
-               "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso"), "GPT_IMAGE_STAGGER": "0", "GPT_IMAGE_PAUSE": "0",
+               "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso"), "PYTHONIOENCODING": "utf-8", "GPT_IMAGE_STAGGER": "0", "GPT_IMAGE_PAUSE": "0",
                **(env or {}),
                **({"FAKE_FAIL": fail if isinstance(fail, str) else "ERROR: boom"} if fail else {}),
                **({"FAKE_SAY": say} if say else {})}
-        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=env, timeout=30)
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, encoding="utf-8", env=env, timeout=30)
 
     def test_images_land_in_the_folder_and_the_result_lists_them(self):
         r = self.run_script("--out", self.out, "-i", self.ref, "--n", "2", "--name", "apple",
@@ -100,11 +108,32 @@ class Script(unittest.TestCase):
         self.assertEqual(a[0], "exec")
         self.assertEqual(a[a.index("-C") + 1], self.out)
         self.assertEqual(a[a.index("-i") + 1], os.path.abspath(self.ref))   # референс — картинкой в codex
-        self.assertIn("glossy red apple on white", a[-1])                    # промпт — как дала сессия
-        self.assertEqual(a[-2], "--")                                        # -i не съедает промпт
-        self.assertEqual(call["stdin"], "")                                  # stdin закрыт: codex не ждёт EOF
+        self.assertEqual(a[-2:], ["--", "-"])                                # -i не съедает «-»; промпт — из stdin
+        self.assertIn("glossy red apple on white", call["stdin"])            # промпт — как дала сессия
         self.assertEqual(a[a.index("-m") + 1], "gpt-6-luna")                 # модель задана, не на выбор codex
         self.assertIn("model_reasoning_effort=medium", a)
+
+    def test_a_multiline_prompt_reaches_codex_whole(self):
+        """16.10, Windows: codex — обёртка codex.cmd, cmd.exe обрезал промпт-аргумент на первом переводе строки
+        («no prompt appeared after the colon»). Промпт идёт через stdin целиком."""
+        r = self.run_script("--out", self.out, "first line\nsecond line: glossy apple")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call = json.load(open(self.log))
+        self.assertIn("first line\nsecond line: glossy apple", call["stdin"].replace("\r\n", "\n"))
+        self.assertNotIn("glossy apple", " ".join(call["args"]))
+
+    def test_a_model_the_login_does_not_support_falls_back_to_the_owners_codex_model(self):
+        """16.10, Windows: «The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account» — модель
+        скрипта не для этого входа. Тогда — модель из config.toml владельца (с ней его codex и работает)."""
+        open(os.path.join(self.home, "config.toml"), "w").write('model = "own-model"\nmodel_reasoning_effort = "high"\n')
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "gpt-6-luna"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        runs = [json.loads(x)["args"] for x in open(self.log + ".all")]
+        self.assertEqual([a[a.index("-m") + 1] for a in runs], ["gpt-6-luna", "own-model"])
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "gpt-6-luna",
+                                                             "GPT_IMAGE_MODEL": "set-model"})
+        a = json.load(open(self.log))["args"]
+        self.assertEqual(a[a.index("-m") + 1], "set-model")   # задана явно — она первой
 
     @unittest.skipIf(os.name == "nt", "ссылки на Windows — с правами администратора; там codex идёт со своим домом")
     def test_codex_runs_without_the_owners_agents_md_but_with_his_login(self):
@@ -177,12 +206,12 @@ class Script(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         files = json.loads(r.stdout.strip().splitlines()[-1])["files"]
         self.assertEqual([os.path.basename(p) for p in files], ["f01-1.png", "f02-1.png"])   # порядок — как в списке
-        by = {c["args"][-1].split("`")[1]: c["args"] for c in self.calls()}
-        self.assertIn("rocket on pad", by["f01-1.png"][-1])
-        self.assertIn("-i", by["f01-1.png"])
-        self.assertIn("rocket lifts off", by["f02-1.png"][-1])                  # prompt_file — от папки списка
-        self.assertNotIn("-i", by["f02-1.png"])
-        self.assertIn("Size: 1536x1024", by["f02-1.png"][-1])
+        by = {c["stdin"].split("`")[1]: c for c in self.calls()}
+        self.assertIn("rocket on pad", by["f01-1.png"]["stdin"])
+        self.assertIn("-i", by["f01-1.png"]["args"])
+        self.assertIn("rocket lifts off", by["f02-1.png"]["stdin"])             # prompt_file — от папки списка
+        self.assertNotIn("-i", by["f02-1.png"]["args"])
+        self.assertIn("Size: 1536x1024", by["f02-1.png"]["stdin"])
 
     def test_on_the_subscription_limit_the_rest_go_one_by_one(self):
         # два из трёх упёрлись в лимит — повтор по одной, все три готовы
@@ -335,8 +364,8 @@ class Script(unittest.TestCase):
         slot = self.busy(0, holder.pid)
         env = {"GPT_IMAGE_SLOTS": "1", "GPT_IMAGE_POLL": "0.2"}
         p = subprocess.Popen([sys.executable, SCRIPT, "--out", self.out, "x"], stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True,
-                             env={**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log,
+                             stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                             env={**os.environ, "GPT_IMAGE_CODEX": self.codex, "FAKE_LOG": self.log, "PYTHONIOENCODING": "utf-8",
                                   "CODEX_HOME": self.home, "GPT_IMAGE_HOME": os.path.join(self.tmp, "iso"),
                                   "GPT_IMAGE_STAGGER": "0", "GPT_IMAGE_PAUSE": "0", **env})
         time.sleep(1.5)
