@@ -64,6 +64,8 @@ for k, n in enumerate(names):
     # а в папку копирует модель — чем найдёт: чужой «свежий PNG», недописанный файл
     took = {"STEAL": b"\\x89PNG foreign", "EMPTY": b""}.get(os.environ.get("FAKE_COPY", ""), mine)
     open(os.path.join(cd, n), "wb").write(took)
+if os.environ.get("FAKE_WATCH"):          # что видно в папке --out, пока codex ещё идёт
+    open(os.environ["FAKE_LOG"] + ".watch", "w").write(json.dumps(sorted(os.listdir(os.environ["FAKE_WATCH"]))))
 open(a[a.index("-o") + 1], "w").write("ok")
 """
 
@@ -106,7 +108,7 @@ class Script(unittest.TestCase):
         call = json.load(open(self.log))
         a = call["args"]
         self.assertEqual(a[0], "exec")
-        self.assertEqual(a[a.index("-C") + 1], self.out)
+        self.assertTrue(a[a.index("-C") + 1].startswith(call["home"]))      # модель пишет в дом запуска, не в папку
         self.assertEqual(a[a.index("-i") + 1], os.path.abspath(self.ref))   # референс — картинкой в codex
         self.assertEqual(a[-2:], ["--", "-"])                                # -i не съедает «-»; промпт — из stdin
         self.assertIn("glossy red apple on white", call["stdin"])            # промпт — как дала сессия
@@ -172,6 +174,17 @@ class Script(unittest.TestCase):
         r = self.run_script("--out", self.out, "--name", "none", "x", env={"FAKE_NOGEN": "1"})
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.out, "none-1.png")))
+
+    def test_the_folder_never_shows_the_models_copy_while_codex_runs(self):
+        # 16.10 (gen-frutiger-aero, 5 запусков): модель копировала в папку --out «свежий PNG» где нашла — чужой
+        # (чемодан вместо магнита); скрипт заменял его своим только в конце, а сессия успела снять превью чужого.
+        # Модель пишет в дом запуска; в папке — только картинка этого запуска, целиком
+        r = self.run_script("--out", self.out, "--name", "magnet", "x",
+                            env={"FAKE_COPY": "STEAL", "FAKE_WATCH": self.out})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("magnet-1.png", json.load(open(self.log + ".watch")))
+        got = open(os.path.join(self.out, "magnet-1.png"), "rb").read()
+        self.assertTrue(got.startswith(b"\x89PNG\r\n\x1a\nrun"), got)
 
     def fresh(self):
         for f in os.listdir(self.tmp):

@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 TIMEOUT = 7 * 60        # с на одну картинку: правило хаба «дольше 7 мин — разбираться» (было 20 мин)
 LOCK = ".gpt-image.lock"
+WORK = "work"           # папка модели в доме запуска (-C): её копия — не результат
 MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol); GPT_IMAGE_MODEL — своя
 # 16.10, Windows: «The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account» — у входа другие
 # модели; тогда модель из config.toml владельца (с ней работает его codex)
@@ -269,7 +270,7 @@ def take(home, path):
     этого запуска; нет её — нет и картинки."""
     own = []
     for root, dirs, files in os.walk(home):
-        dirs[:] = [d for d in dirs if d not in ("skills", "plugins")]   # значки встроенных скиллов — не результат
+        dirs[:] = [d for d in dirs if d not in ("skills", "plugins", WORK)]   # значки скиллов и копия модели — не результат
         for f in files:
             p = os.path.join(root, f)
             if f.lower().endswith(".png") and os.path.getsize(p):
@@ -368,14 +369,19 @@ def run(job, out):
 def attempt(job, out, model):
     """Один запуск codex — одна картинка. -> (файл или None, почему нет)."""
     last = tempfile.NamedTemporaryFile(prefix="gpt-image-", suffix=".txt", delete=False).name
-    cmd = [codex(), "exec", "--skip-git-repo-check", "-C", out, "-s", "workspace-write", "-o", last,
+    home = isolated()
+    # 16.10 (gen-frutiger-aero): модель клала в --out свою копию — чужой «свежий PNG», и до конца запуска в папке лежал
+    # чемодан вместо магнита. Модель пишет в дом запуска; в папку картинку кладёт только take
+    work = os.path.join(home, WORK) if home else out
+    if home:
+        os.makedirs(work, exist_ok=True)
+    cmd = [codex(), "exec", "--skip-git-repo-check", "-C", work, "-s", "workspace-write", "-o", last,
            "-m", model, "-c", f"model_reasoning_effort={EFFORT}"]
     for r in job["refs"]:
         cmd += ["-i", r]
     # промпт — через stdin («-»): на Windows codex — обёртка codex.cmd, и cmd.exe обрезал многострочный аргумент на
     # первом переводе строки (16.10: «no prompt appeared after the colon»); -i берёт несколько — без «--» съел бы «-»
     cmd += ["--", "-"]
-    home = isolated()
     env = {**os.environ, "CODEX_HOME": home} if home else None
     path = os.path.join(out, job["file"])
     slot = take_slot(out)
