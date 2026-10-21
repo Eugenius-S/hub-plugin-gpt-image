@@ -15,7 +15,7 @@
 запуск в ту же папку, пока первый жив, сразу выходит с кодом 1 (замок — файл .gpt-image.lock с pid, мёртвый замок снимается);
 одна картинка — не дольше 7 мин (GPT_IMAGE_TIMEOUT, с), иначе в "failed"; каждая готовая — строка «готово i/N: файл» в stderr.
 
-Занятость GPT — одна на всех (владелец 15.10: сессии простаивали, не зная, свободен ли GPT): каждый запуск codex занимает
+Занятость GPT — одна на всех: каждый запуск codex занимает
 место (GPT_IMAGE_SLOTS, по умолчанию 4) в общей папке GPT_IMAGE_HOME/busy, упор в лимит ставит паузу для всех
 (кулдаун до ЧЧ:ММ:СС). Мест нет или пауза — запуск ждёт своей очереди со строкой «жду GPT: …» в stderr, не долбит лимит.
 `gpt-image --status` — «GPT свободен: k из N мест» (код 0) или «GPT занят до ЧЧ:ММ:СС: кем» (код 2): свободен —
@@ -43,14 +43,14 @@ from concurrent.futures import ThreadPoolExecutor
 TIMEOUT = 7 * 60        # с на одну картинку: правило хаба «дольше 7 мин — разбираться» (было 20 мин)
 LOCK = ".gpt-image.lock"
 WORK = "work"           # папка модели в доме запуска (-C): её копия — не результат
-MODEL = "gpt-6-luna"    # владелец 13.10: GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol); GPT_IMAGE_MODEL — своя
+MODEL = "gpt-6-luna"    # GPT-6 Luna, effort medium (сам codex брал gpt-6.1-sol); GPT_IMAGE_MODEL — своя
 # 16.10, Windows: «The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account» — у входа другие
 # модели; тогда модель из config.toml владельца (с ней работает его codex)
 UNSUPPORTED = re.compile(r"model is not supported|model_not_found|does not exist or you do not have access", re.I)
 EFFORT = "medium"
 JOBS, MAX_JOBS = 3, 4   # codex сразу: подписка ChatGPT держит несколько генераций; больше — чаще упор в лимит
 STAGGER = 3             # с между запусками: codex обновляет вход при старте — не все разом
-PAUSE = 120             # с после упора в лимит — перед каждым повтором по одной (владелец 15.10: лимит GPT на
+PAUSE = 120             # с после упора в лимит — перед каждым повтором по одной (лимит GPT на
 TRIES = 3               # одновременные генерации снимается через пару минут); повторов не больше TRIES, и при --jobs 1
 # 13.10: посреди пачки вход Codex сменили на другой аккаунт — у идущих «token could not be refreshed»; повтор берёт новый
 SLOTS = 4               # мест GPT на всех сразу: общий лимит подписки ChatGPT на одновременные генерации

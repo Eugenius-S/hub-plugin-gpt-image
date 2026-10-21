@@ -196,7 +196,7 @@ class Script(unittest.TestCase):
             return [json.loads(x) for x in f]
 
     def test_several_images_are_made_at_once(self):
-        # владелец 13.10 (q93848): кадр 1–3.5 мин, пачка из 10 шла по одному 25 мин — генерить параллельно
+        # кадр 1–3.5 мин, пачка из 10 шла по одному 25 мин — генерить параллельно
         t = time.time()
         r = self.run_script("--out", self.out, "--n", "3", "--name", "f", "x", env={"FAKE_SLEEP": "1.5"})
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -358,7 +358,7 @@ class Script(unittest.TestCase):
         return os.path.join(d, f"slot-{k}.json")
 
     def test_status_says_free_or_busy_until_and_by_whom(self):
-        # владелец 15.10: сессии простаивали, не зная, свободен ли GPT — одна команда для всех
+        # сессии простаивали, не зная, свободен ли GPT — одна команда для всех
         r = self.run_script("--status")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("GPT свободен: 4 из 4 мест", r.stdout)
