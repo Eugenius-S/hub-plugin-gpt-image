@@ -1,9 +1,15 @@
 {
   "name": "gpt-image",
   "icon": "icon.png",
-  "description": "Сессии рисуют картинки по вашей подписке ChatGPT, без API-ключа и доплат: по описанию и до 16 образцов, готовое сразу ложится в папку проекта. Описания и образцы уходят в OpenAI",
-  "why": "Сессия отдаёт готовую картинку, а не только описание для неё",
-  "version": "1.5.2",
+  "description": "Sessions draw pictures on your ChatGPT subscription, no API key and no extra payment: from a description and up to 16 references, the result lands straight in the project folder. Descriptions and references go to OpenAI",
+  "why": "A session hands over a finished picture, not just a description for one",
+  "version": "1.6.0",
   "hub": "^1.0",
-  "skills": true
+  "skills": true,
+  "i18n": {
+    "ru": {
+      "description": "Сессии рисуют картинки по вашей подписке ChatGPT, без API-ключа и доплат: по описанию и до 16 образцов, готовое сразу ложится в папку проекта. Описания и образцы уходят в OpenAI",
+      "why": "Сессия отдаёт готовую картинку, а не только описание для неё"
+    }
+  }
 }

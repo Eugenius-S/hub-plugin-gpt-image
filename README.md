@@ -1,45 +1,51 @@
-# GPT Image — плагин Agents Hub
+# GPT Image - an Agents Hub plugin
 
-Генерация картинок через Codex CLI по вашей подписке ChatGPT: промпт, до 16 референсов и папка — картинки ложатся
-прямо в проект. Без API-ключа и отдельной оплаты; работает фоном, при сбое показывает причину (лимит, модерация,
-сеть). **Риск:** промпты и референсы уходят в OpenAI.
+Picture generation through Codex CLI on your ChatGPT subscription: a prompt, up to 16 references and a folder - the
+pictures land right in the project. No API key and no separate payment; it works in the background and on a failure
+shows the reason (limit, moderation, network). **Risk:** prompts and references go to OpenAI.
 
-Это набор скиллов для сессий хаба: после установки в каталоге появляется инструмент `gpt-image@…`, хаб выдаёт его
-сессиям. Сессия запускает скрипт фоном:
+This is a set of skills for hub sessions: after installing, a `gpt-image@...` tool appears in the catalog and the hub
+hands it to sessions. A session runs the script in the background:
 
 ```
-python3 plugins/gpt-image/bin/gpt-image --out <папка> [-i ref.png …] [--n 1-4] [--name имя] [--size 1024x1024] "<промпт>"
+python3 plugins/gpt-image/bin/gpt-image --out <folder> [-i ref.png ...] [--n 1-4] [--name name] [--size 1024x1024] "<prompt>"
 ```
 
-Итог — JSON `{"files": [...]}`; файлы `<имя>-1.png`, `<имя>-2.png`…, занятые имена не затираются.
+The result is JSON `{"files": [...]}`; files `<name>-1.png`, `<name>-2.png`..., taken names are never overwritten.
 
-Несколько картинок идут параллельно, по 3 сразу (`--jobs 1-4`): `--n 4` — варианты одного промпта, `--batch файл.json`
-— пачка со своими промптами, образцами и именами (`[{"prompt" | "prompt_file", "name", "images", "size", "n"}]`).
-Упёрлись в лимит ChatGPT — упавшие по одной, до 3 повторов через 2 мин (и при `--jobs 1`), строка «лимит GPT: повтор i/3 через 2 мин»
-в stderr; не прошло — в `"failed"` с текстом ошибки.
+Several pictures go in parallel, 3 at once (`--jobs 1-4`): `--n 4` - variants of one prompt, `--batch file.json` - a
+batch with own prompts, references and names (`[{"prompt" | "prompt_file", "name", "images", "size", "n"}]`).
+Hit the ChatGPT limit - the failed ones are retried one by one, up to 3 times after 2 min (with `--jobs 1` too), the line
+"GPT limit: retry i/3 in 2 min" goes to stderr; still failing - into `"failed"` with the error text.
 
-Защита от дублей: в одной папке `--out` идёт одна генерация — второй запуск в ту же папку, пока первый жив, сразу выходит
-с ошибкой «уже идёт генерация (pid N с ЧЧ:ММ)» (замок — файл `.gpt-image.lock`, замок умершего запуска снимается).
-Одна картинка — не дольше 7 мин, иначе в `"failed"`. Каждая готовая — строка «готово i/N: файл» в stderr.
+Protection from duplicates: one generation per `--out` folder - a second run into the same folder while the first is
+alive exits at once with the error "a generation is already running (pid N since HH:MM)" (the lock is the file
+`.gpt-image.lock`, the lock of a dead run is removed). One picture takes at most 7 min, otherwise it goes to `"failed"`.
+Every finished one is a line "done i/N: file" in stderr.
 
-GPT один на все сессии: каждый запуск занимает место (по умолчанию 4, `GPT_IMAGE_SLOTS`), упор в лимит подписки ставит
-паузу для всех. Мест нет — запуск ждёт своей очереди, а не долбит лимит. `gpt-image --status` показывает «GPT свободен:
-k из N мест» или «GPT занят до ЧЧ:ММ:СС: кем»: свободен — сессия сразу шлёт следующий кадр, не простаивая.
+GPT is one for all sessions: every run takes a slot (4 by default, `GPT_IMAGE_SLOTS`), hitting the subscription limit
+pauses everyone. No free slot - the run waits its turn instead of hammering the limit. `gpt-image --status` prints
+"GPT free: k of N slots" or "GPT busy until HH:MM:SS: by whom": if free - the session sends the next frame at once,
+not idling.
 
-Модель — GPT-6 Luna (`GPT_IMAGE_MODEL` — своя). Вход ChatGPT её не принимает («model is not supported») — картинка
-идёт моделью из `~/.codex/config.toml`, с которой работает ваш Codex. Промпт уходит в Codex через stdin: на Windows
-многострочный промпт доходит целиком.
+The model is GPT-6 Luna (`GPT_IMAGE_MODEL` - your own). If the ChatGPT login does not accept it ("model is not
+supported"), the picture is made with the model from `~/.codex/config.toml`, the one your Codex works with. The prompt
+reaches Codex through stdin: on Windows a multi-line prompt arrives whole.
 
-## Что нужно
+Language: the script's messages (progress lines, errors, `--status`) are English by default and Russian when the hub
+language is Russian - taken from the hub (`core.i18n`) when the hub code is on `PYTHONPATH`, otherwise from the
+`HUB_LANG` environment variable.
 
-- Codex CLI с входом через ChatGPT: `codex login` (Codex из ChatGPT.app тоже подходит), функция `image_generation`
-  включена (`codex features list`).
-- Прокси из окружения (`HTTPS_PROXY`) codex берёт сам.
+## Requirements
 
-## Поставить
+- Codex CLI signed in with ChatGPT: `codex login` (Codex from ChatGPT.app works too), the `image_generation` feature
+  enabled (`codex features list`).
+- Codex picks up the proxy from the environment (`HTTPS_PROXY`) itself.
 
-«Настройки» → «Плагины» → «Можно поставить» → gpt-image.
+## Install
 
-Тесты: `python3 -m unittest discover -s tests`. Код — MIT, значок — логотип OpenAI (Simple Icons, CC0).
+Settings -> Plugins -> Available -> gpt-image.
 
-Иконка — логотип ChatGPT (OpenAI).
+Tests: `python3 -m unittest discover -s tests`. Code - MIT, the icon - the OpenAI logo (Simple Icons, CC0).
+
+Icon — the ChatGPT (OpenAI) logo.

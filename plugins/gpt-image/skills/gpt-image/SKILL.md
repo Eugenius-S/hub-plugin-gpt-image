@@ -1,42 +1,49 @@
 ---
 name: gpt-image
-description: Сгенерировать или отредактировать картинку моделью GPT Image (через Codex CLI по подписке ChatGPT) и сохранить в папку. Используй, когда нужна готовая картинка, а не только промпт: иллюстрация по описанию, вариант по референсу, правка изображения.
+description: Generate or edit a picture with the GPT Image model (through Codex CLI on a ChatGPT subscription) and save it to a folder. Use when you need a finished picture, not just a prompt: an illustration from a description, a variation from a reference, an image edit.
 ---
 
 # GPT Image
 
-Картинки делает GPT Image через Codex CLI: промпт, референсы и папка — файлы ложатся в папку. Картинки и референсы
-уходят в OpenAI по подписке владельца.
+GPT Image makes the pictures through Codex CLI: prompt, references and a folder - the files land in the folder.
+Pictures and references go to OpenAI on the owner's subscription.
 
-Генерация идёт минуты — запускай **фоном** (Bash с `run_in_background`), итог придёт сам:
+Generation takes minutes - run it **in the background** (Bash with `run_in_background`), the result arrives by itself:
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --out <папка> [-i ref1.png -i ref2.png] [--n 1-4] [--name имя] \
-  [--size 1024x1024] "<промпт>"
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --out <folder> [-i ref1.png -i ref2.png] [--n 1-4] [--name name] \
+  [--size 1024x1024] "<prompt>"
 ```
 
-- Промпт длинный — в файл и `--prompt-file <файл>`. Промпт уходит в модель как есть: пиши его сам целиком
-  (скилл `image`, если выдан, — как писать промпты GPT Image).
-- `-i` — референсы (до 16): в промпте скажи, что брать из каждого.
-- Картинка — 1–3 минуты, поэтому **несколько картинок — одним запуском, они идут параллельно** (по 3 сразу): `--n 4`
-  — варианты одного промпта; кадры, серия, пачка со своими промптами — `--batch`, не запуск на каждый кадр по очереди:
+- A long prompt goes into a file and `--prompt-file <file>`. The prompt reaches the model as is: write it out in full
+  yourself (the `image` skill, if you have it, tells how to write GPT Image prompts).
+- `-i` - references (up to 16): say in the prompt what to take from each.
+- A picture takes 1-3 minutes, so **several pictures - one run, they go in parallel** (3 at once): `--n 4` - variants
+  of one prompt; frames, a series, a batch with own prompts - `--batch`, not one run per frame in turn:
 
   ```
-  python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --out <папка> --batch <папка>/frames.json
+  python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --out <folder> --batch <folder>/frames.json
   ```
-  `frames.json` — `[{"prompt_file": "f01.txt", "name": "f01", "images": ["ref.png"]}, {"prompt": "…", "name": "f02"}]`
-  (ещё `size`, `n`; пути — от папки файла). Пачка больше 12 — частями по 12. `--jobs 1–4` — сколько сразу, по умолчанию 3.
-- Лимит подписки ChatGPT: упёрлись — скрипт сам повторит упавшие по одной, до 3 раз через 2 мин (в выводе строки «лимит GPT: повтор i/3»); не прошло — в итоге `failed` с
-  причиной (там же время, когда лимит снимется). Не перезапускай сразу: скажи хабу одной строкой.
-- В одной папке `--out` — одна генерация: второй запуск в ту же папку, пока первый жив, выходит сразу («уже идёт генерация
-  (pid N …)»). Не запускай повторно «на всякий случай» и не гоняй ту же пачку из фона и из скрипта: дождись или останови первый.
-  Картинка — не дольше 7 мин, иначе в `failed`; ход — строки «готово i/N: файл» в stderr.
-- **GPT общий на всех сессий.** Свободен ли он — `python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --status`: «GPT свободен:
-  k из N мест» (код 0) или «GPT занят до ЧЧ:ММ:СС: кем» (код 2). Ждёшь владельца (согласование болванки, выбор) и GPT
-  свободен — не простаивай: сразу запускай фоном следующие кадры, которым ответ не нужен. Занят — запуск сам дождётся места
-  (строка «жду GPT: …»), лимит ставит паузу для всех.
-- Файлы — `<имя>-1.png`, `<имя>-2.png`…; занятые номера пропускаются, старое не затирается.
-- Итог — последняя строка вывода, JSON `{"files": [...]}`, не вышедшие — `"failed": [{"name", "reason"}]`. Ошибка `нет codex` или вход — скажи хабу одной строкой.
-- Отсмотри каждую полученную картинку сам (Read файла), прежде чем отдавать: тот ли объект и стиль, что в промпте, не пустая
-  ли. Не то — перегенерируй этот кадр; дважды не то — скажи, что не вышло, не отдавай как готовое.
-- Покажи результат владельцу: `hub send-file <файл> "<что на нём>"`.
+  `frames.json` - `[{"prompt_file": "f01.txt", "name": "f01", "images": ["ref.png"]}, {"prompt": "...", "name": "f02"}]`
+  (also `size`, `n`; paths are relative to the file's folder). A batch over 12 - in parts of 12. `--jobs 1-4` - how many at
+  once, 3 by default.
+- ChatGPT subscription limit: if hit, the script retries the failed ones one by one, up to 3 times after 2 min (the
+  output has lines "GPT limit: retry i/3 in 2 min"); still failing - the result has `failed` with the reason (the time
+  the limit lifts is in it too). Do not restart at once: tell the hub in one line.
+- One generation per `--out` folder: a second run into the same folder while the first is alive exits at once
+  ("a generation is already running in ... (pid N ...)"). Do not rerun "just in case" and do not run the same batch
+  from the background and from a script: wait for the first or stop it. A picture takes at most 7 min, otherwise it goes
+  to `failed`; progress - lines "done i/N: file" in stderr.
+- **GPT is shared by all sessions.** Whether it is free - `python3 "${CLAUDE_PLUGIN_ROOT}/bin/gpt-image" --status`:
+  "GPT free: k of N slots" (exit code 0) or "GPT busy until HH:MM:SS: by whom" (exit code 2). If you are waiting for the
+  owner (a blank to approve, a choice) and GPT is free - do not idle: start the next frames that need no answer in the
+  background at once. If busy - the run waits for a slot itself (line "waiting for GPT: ..."), the limit pauses everyone.
+- The script's lines (progress, retries, errors, `--status`) come in the hub language, English or Russian; the
+  English wording is quoted here.
+- Files - `<name>-1.png`, `<name>-2.png`...; taken numbers are skipped, old files are never overwritten.
+- The result is the last output line, JSON `{"files": [...]}`, the ones that failed - `"failed": [{"name", "reason"}]`.
+  Error "codex not found" or a login problem - tell the hub in one line.
+- Look at every picture you get yourself (Read the file) before handing it over: is it the right object and style from
+  the prompt, is it not empty. Not it - regenerate this frame; wrong twice - say it did not work out, do not hand it
+  over as done.
+- Show the result to the owner: `hub send-file <file> "<what is in it>"`.
