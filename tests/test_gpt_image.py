@@ -49,7 +49,7 @@ if m and m == os.environ.get("FAKE_UNSUPPORTED"):   # the model is not for this 
     sys.exit(1)
 cd = a[a.index("-C") + 1]
 prompt = call["stdin"] if a[-1] == "-" else a[-1]
-names = re.findall(r"`([\\w.-]+\\.png)`", prompt)
+names = ["out.png"]                       # the prompt names no file: the model only draws, the script collects
 if os.environ.get("FAKE_SAY"):            # codex got to the end but made no picture - said why
     open(a[a.index("-o") + 1], "w").write(os.environ["FAKE_SAY"])
     sys.exit(0)
@@ -120,8 +120,10 @@ class Script(unittest.TestCase):
         self.assertEqual(a[a.index("-i") + 1], os.path.abspath(self.ref))   # the reference goes to codex as an image
         self.assertEqual(a[-2:], ["--", "-"])                                # -i does not swallow "-"; the prompt comes from stdin
         self.assertIn("glossy red apple on white", call["stdin"])            # the prompt is as the session gave it
+        self.assertNotIn("Save the results", call["stdin"])                  # the model only draws: saving, copying and looking
+        self.assertIn("do not read skills", call["stdin"])                   # at the result were ~170k tokens a frame, not ~46k
         self.assertEqual(a[a.index("-m") + 1], "gpt-6-luna")                 # the model is set, not codex's choice
-        self.assertIn("model_reasoning_effort=medium", a)
+        self.assertIn("model_reasoning_effort=low", a)                       # the least that gives a picture
 
     def test_a_multiline_prompt_reaches_codex_whole(self):
         """Oct 16, Windows: codex is the codex.cmd wrapper, cmd.exe cut the prompt argument at the first line break
@@ -132,18 +134,48 @@ class Script(unittest.TestCase):
         self.assertIn("first line\nsecond line: glossy apple", call["stdin"].replace("\r\n", "\n"))
         self.assertNotIn("glossy apple", " ".join(call["args"]))
 
-    def test_a_model_the_login_does_not_support_falls_back_to_the_owners_codex_model(self):
-        """Oct 16, Windows: "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account" - the
-        script's model is not for this login. Then - the model from the owner's config.toml (his codex works with it)."""
+    def models_of(self):
+        return [json.loads(x)["args"][json.loads(x)["args"].index("-m") + 1] for x in open(self.log + ".all")]
+
+    def test_a_model_the_login_does_not_support_falls_back_to_the_next_light_one(self):
+        """Oct 16 and 21: "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account". The
+        owner's config.toml holds the heavy gpt-6.1-sol with effort high - it was taken as the fallback and ate the
+        ChatGPT limit (and the login refused it too). Now only the light models, never the owner's one."""
         open(os.path.join(self.home, "config.toml"), "w").write('model = "own-model"\nmodel_reasoning_effort = "high"\n')
         r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "gpt-6-luna"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        runs = [json.loads(x)["args"] for x in open(self.log + ".all")]
-        self.assertEqual([a[a.index("-m") + 1] for a in runs], ["gpt-6-luna", "own-model"])
-        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "gpt-6-luna",
-                                                             "GPT_IMAGE_MODEL": "set-model"})
+        self.assertEqual(self.models_of(), ["gpt-6-luna", "gpt-5.6-luna"])
         a = json.load(open(self.log))["args"]
-        self.assertEqual(a[a.index("-m") + 1], "set-model")   # set explicitly - it goes first
+        self.assertIn("model_reasoning_effort=low", a)
+
+    def test_a_refused_model_is_remembered_and_costs_no_run_next_time(self):
+        """The first picture learns that the login refuses gpt-6-luna; the next ones go straight to the next model -
+        no spare codex run (each one starts a session and bills the limit)."""
+        env = {"FAKE_UNSUPPORTED": "gpt-6-luna"}
+        self.assertEqual(self.run_script("--out", self.out, "apple", env=env).returncode, 0)
+        os.remove(self.log + ".all")
+        self.assertEqual(self.run_script("--out", self.out, "apple", env=env).returncode, 0)
+        self.assertEqual(self.models_of(), ["gpt-5.6-luna"])
+
+    def test_the_memory_of_a_refusal_expires(self):
+        env = {"FAKE_UNSUPPORTED": "gpt-6-luna", "GPT_IMAGE_UNSUPPORTED_TTL": "0"}
+        self.run_script("--out", self.out, "apple", env=env)
+        os.remove(self.log + ".all")
+        self.run_script("--out", self.out, "apple", env=env)
+        self.assertEqual(self.models_of(), ["gpt-6-luna", "gpt-5.6-luna"])   # the login may have got it by now
+
+    def test_a_model_set_explicitly_is_used_as_is(self):
+        """GPT_IMAGE_MODEL: your own model or a list - in that order, nothing else, a refusal is not remembered."""
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "set-model", "GPT_IMAGE_MODEL": "set-model"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.models_of(), ["set-model"])
+        os.remove(self.log + ".all")
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "set-model", "GPT_IMAGE_MODEL": "set-model, other"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.models_of(), ["set-model", "other"])
+        os.remove(self.log + ".all")
+        self.run_script("--out", self.out, "apple", env={"GPT_IMAGE_EFFORT": "medium"})
+        self.assertIn("model_reasoning_effort=medium", json.load(open(self.log))["args"])   # effort - your own too
 
     @unittest.skipIf(os.name == "nt", "links on Windows need administrator rights; there codex runs with its own home")
     def test_codex_runs_without_the_owners_agents_md_but_with_his_login(self):
@@ -177,7 +209,6 @@ class Script(unittest.TestCase):
             for p in json.loads(r.stdout.strip().splitlines()[-1])["files"]:
                 got = open(p, "rb").read()
                 self.assertTrue(got.startswith(b"\x89PNG\r\n\x1a\nrun"), (copy, got))
-                self.assertTrue(got.endswith(os.path.basename(p).encode()), (copy, got))
         self.assertFalse([f for f in os.listdir(self.out) if f.endswith(".part")])
         # no own picture but the model put something - do not hand out a foreign one
         r = self.run_script("--out", self.out, "--name", "none", "x", env={"FAKE_NOGEN": "1"})
@@ -229,7 +260,7 @@ class Script(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         files = json.loads(r.stdout.strip().splitlines()[-1])["files"]
         self.assertEqual([os.path.basename(p) for p in files], ["f01-1.png", "f02-1.png"])   # the order is as in the list
-        by = {c["stdin"].split("`")[1]: c for c in self.calls()}
+        by = {("f01-1.png" if "rocket on pad" in c["stdin"] else "f02-1.png"): c for c in self.calls()}
         self.assertIn("rocket on pad", by["f01-1.png"]["stdin"])
         self.assertIn("-i", by["f01-1.png"]["args"])
         self.assertIn("rocket lifts off", by["f02-1.png"]["stdin"])             # prompt_file is relative to the list's folder

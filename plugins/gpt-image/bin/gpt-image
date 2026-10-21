@@ -50,11 +50,15 @@ from concurrent.futures import ThreadPoolExecutor
 TIMEOUT = 7 * 60        # s per picture: the hub rule "longer than 7 min - investigate" (it was 20 min)
 LOCK = ".gpt-image.lock"
 WORK = "work"           # the model's folder inside the run home (-C): its copy is not a result
-MODEL = "gpt-6-luna"    # GPT-6 Luna, effort medium (codex itself picked gpt-6.1-sol); GPT_IMAGE_MODEL - your own
-# Oct 16, Windows: "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account" - the login has
-# other models; then the model from the owner's config.toml (his codex works with it)
+# The lightest models first (codex itself would pick the owner's heavy one, gpt-6.1-sol, with effort high - Oct 21: the
+# picture ate the ChatGPT limit). A model the login does not accept ("The 'gpt-6-luna' model is not supported when using
+# Codex with a ChatGPT account", Oct 16 and 21) is remembered on this machine for UNSUPPORTED_TTL, and the next picture
+# does not spend a run on it; then the next one in the list. Never the owner's model from config.toml: it is the heavy
+# one. GPT_IMAGE_MODEL - your own: one model or a comma-separated list, taken as is, in that order.
+MODELS = ("gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra")
 UNSUPPORTED = re.compile(r"model is not supported|model_not_found|does not exist or you do not have access", re.I)
-EFFORT = "medium"
+UNSUPPORTED_TTL = 12 * 3600   # s; the login may get the model later (GPT_IMAGE_UNSUPPORTED_TTL)
+EFFORT = "low"          # the least that gives a picture (GPT_IMAGE_EFFORT); the picture is made by the image tool, not by thinking
 JOBS, MAX_JOBS = 3, 4   # codex runs at once: a ChatGPT subscription holds several generations; more - the limit hits more often
 STAGGER = 3             # s between starts: codex refreshes the login at start - not all at once
 PAUSE = 120             # s after hitting the limit - before every one-by-one retry (the GPT limit on
@@ -368,16 +372,19 @@ def names(out, base, n, taken):
     return got
 
 
-def task(prompt, files, refs, size):
-    lines = [f"Generate {len(files)} image(s) with your image generation tool. Pass this prompt to the tool as is, "
+def task(prompt, refs, size):
+    """What the model is told. Short on purpose: it is only the hand of the image tool. The script takes the picture
+    from the run home itself (take), so the model neither saves nor copies nor looks at it - Oct 21: with "save under
+    this name" it read the image skill (25k characters), polled the tool and copied the file in a shell, about 170k
+    tokens a frame against 46k like this, and a minute longer."""
+    lines = ["Generate 1 image with your image generation tool. Pass this prompt to the tool as is, "
              "without rewriting it:", "", prompt, ""]
     if refs:
         lines.append(f"Use the {len(refs)} attached image(s) as references, as the prompt describes.")
     if size:
         lines.append(f"Size: {size}.")
-    lines += ["Save the results as PNG into the current directory under exactly these names: "
-              + ", ".join(f"`{f}`" for f in files) + ".",
-              "Do not create, change or delete any other file. Reply with the saved file names only."]
+    lines += ["Call the image generation tool directly: do not read skills or other files, do not save, copy or "
+              "inspect the result - the picture is collected from the tool's own folder. Reply with the word done only."]
     return "\n".join(lines)
 
 
@@ -412,31 +419,48 @@ def codex_run(cmd, prompt, env):
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
-def owners_model():
-    """The model from the owner's config.toml (`model = "..."`) or None."""
-    path = os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")), "config.toml")
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                m = re.match(r'\s*model\s*=\s*"([^"]+)"', line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    return None
+UNSUPPORTED_FILE = "unsupported.json"
+
+
+def unsupported():
+    """Models this login refused on this machine, still within the TTL: {model: when}."""
+    ttl = float(os.environ.get("GPT_IMAGE_UNSUPPORTED_TTL", UNSUPPORTED_TTL))
+    got = _read(os.path.join(busy_dir(), UNSUPPORTED_FILE))
+    return {m: t for m, t in (got or {}).items() if isinstance(t, (int, float)) and time.time() - t < ttl}
+
+
+def remember_unsupported(model):
+    p = os.path.join(busy_dir(), UNSUPPORTED_FILE)
+    with SETTLE:   # threads of one run; between processes the last writer wins - the lines it loses are re-learned
+        got = unsupported()
+        got[model] = time.time()
+        tmp = f"{p}.{os.getpid()}.{threading.get_ident()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(got, f)
+        os.replace(tmp, p)
 
 
 def models():
-    first = os.environ.get("GPT_IMAGE_MODEL") or MODEL
-    return [first] + [m for m in [owners_model()] if m and m != first]
+    """Models to try, in order: GPT_IMAGE_MODEL as is, or the light ones without those this login already refused
+    (all refused - the whole list again: the memory may be stale)."""
+    own = [m.strip() for m in (os.environ.get("GPT_IMAGE_MODEL") or "").split(",") if m.strip()]
+    if own:
+        return own
+    refused = unsupported()
+    return [m for m in MODELS if m not in refused] or list(MODELS)
 
 
 def run(job, out):
-    """One picture: the script's model; if the login did not accept it - the owner's model. -> (file or None, why not)."""
+    """One picture: the first model of the list; the login did not accept it - remember that and take the next.
+    -> (file or None, why not)."""
+    explicit = bool(os.environ.get("GPT_IMAGE_MODEL"))
+    got = (None, "")
     for model in models():
         got = attempt(job, out, model)
         if got[0] or not UNSUPPORTED.search(got[1]):
             return got
+        if not explicit:
+            remember_unsupported(model)
     return got
 
 
@@ -450,7 +474,7 @@ def attempt(job, out, model):
     if home:
         os.makedirs(work, exist_ok=True)
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", work, "-s", "workspace-write", "-o", last,
-           "-m", model, "-c", f"model_reasoning_effort={EFFORT}"]
+           "-m", model, "-c", f"model_reasoning_effort={os.environ.get('GPT_IMAGE_EFFORT') or EFFORT}"]
     for r in job["refs"]:
         cmd += ["-i", r]
     # the prompt goes through stdin ("-"): on Windows codex is the codex.cmd wrapper, and cmd.exe cut a multi-line
@@ -461,7 +485,7 @@ def attempt(job, out, model):
     path = os.path.join(out, job["file"])
     slot = take_slot(out)
     try:
-        r = codex_run(cmd, task(job["prompt"], [job["file"]], job["refs"], job["size"]), env)
+        r = codex_run(cmd, task(job["prompt"], job["refs"], job["size"]), env)
         if home and r is not None:
             take(home, path)
     finally:
