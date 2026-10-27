@@ -22,6 +22,8 @@ a = sys.argv[1:]
 h = os.environ.get("CODEX_HOME")
 call = {"args": a, "stdin": sys.stdin.read(), "home": h, "link": os.path.islink(os.path.join(h, "auth.json")),
         "agents": os.path.exists(os.path.join(h, "AGENTS.md"))}
+ins = [x.split("=", 1)[1].strip('"') for x in a if x.startswith("model_instructions_file=")]
+call["instructions"] = open(ins[0], encoding="utf-8").read().strip() if ins and os.path.isfile(ins[0]) else None
 with open(os.environ["FAKE_LOG"], "w") as f:
     json.dump(call, f)
 with open(os.environ["FAKE_LOG"] + ".all", "a") as f:   # all runs, one line each
@@ -168,6 +170,38 @@ class Script(unittest.TestCase):
     def test_the_model_of_each_run_is_printed(self):
         r = self.run_script("--out", self.out, "apple")
         self.assertIn("model gpt-6-luna, effort low", r.stderr)
+
+    def test_codex_wrapper_is_taken_off_and_the_image_tool_is_left(self):
+        """Oct 27: a text run of codex took 19105 input tokens for "Reply with OK" - its system prompt, 40k characters of
+        tools, the owner's skills. The run gets a one-line instruction file and the extras off (4611 tokens); the image
+        generation tool and the shell it is called through are never turned off."""
+        r = self.run_script("--out", self.out, "apple")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call = json.load(open(self.log))
+        a = call["args"]
+        self.assertEqual(call["instructions"], "You draw pictures with the image generation tool. "
+                         "Do exactly what the user asks, answer briefly.")
+        for want in ("agents.enabled=false", 'web_search="disabled"', "project_doc_max_bytes=0",
+                     "skills.max_context_tokens=1", "features.multi_agent=false", "features.apps=false",
+                     "features.plugins=false", "features.goals=false"):
+            self.assertIn(want, a)
+        joined = " ".join(a)
+        for keep in ("image_generation", "image_gen", "unified_exec", "shell_tool", "code_mode"):
+            self.assertNotIn(keep, joined)   # nothing that the picture needs is switched off
+        self.assertTrue(all(x.startswith("features.") and x.endswith("=false") for x in a if x.startswith("features.")))
+        self.assertEqual(a[-2:], ["--", "-"])
+
+    def test_the_instructions_file_goes_away_with_the_run_home(self):
+        self.run_script("--out", self.out, "apple")
+        ins = json.loads(open(self.log + ".all").read().splitlines()[0])["args"]
+        path = next(x.split("=", 1)[1].strip('"') for x in ins if x.startswith("model_instructions_file="))
+        self.assertFalse(os.path.exists(path))
+
+    def test_lean_can_be_turned_off(self):
+        self.run_script("--out", self.out, "apple", env={"GPT_IMAGE_LEAN": "0"})
+        a = json.load(open(self.log))["args"]
+        self.assertFalse(any("model_instructions_file" in x or x.startswith("features.") for x in a))
+        self.assertIn("model_reasoning_effort=low", a)
 
     def test_which_model_shows_the_choice_without_a_run(self):
         env = {"FAKE_UNSUPPORTED": "gpt-6-luna"}

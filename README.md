@@ -37,6 +37,12 @@ is usually a heavy one and eats the ChatGPT limit. `GPT_IMAGE_MODEL` - your own 
 is, in that order; `GPT_IMAGE_EFFORT` - your own effort. The prompt
 reaches Codex through stdin: on Windows a multi-line prompt arrives whole.
 
+Thin Codex run: besides the picture Codex adds its own system prompt, sub-agent, sleep and question tools, the owner's
+skills, project docs and web search to every request (a text run "Reply with OK" took 19105 input tokens). The script
+swaps the system prompt for a one-line instruction file and turns the extras off (`agents`, `web_search`, skills,
+`features.multi_agent|apps|plugins|hooks|goals|memories|...`) - the same text run takes 4611 tokens. The image
+generation tool and the shell it is called through stay. `GPT_IMAGE_LEAN=0` brings the full wrapper back.
+
 Language: the script's messages (progress lines, errors, `--status`) are English by default and Russian when the hub
 language is Russian - taken from the hub (`core.i18n`) when the hub code is on `PYTHONPATH`, otherwise from the
 `HUB_LANG` environment variable.

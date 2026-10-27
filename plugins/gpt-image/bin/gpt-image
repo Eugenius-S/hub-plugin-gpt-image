@@ -61,6 +61,15 @@ MODELS = ("gpt-6-luna", "gpt-5.6-luna")
 UNSUPPORTED = re.compile(r"model is not supported|model_not_found|does not exist or you do not have access", re.I)
 UNSUPPORTED_TTL = 12 * 3600   # s; the login may get the model later (GPT_IMAGE_UNSUPPORTED_TTL)
 EFFORT = "low"          # the least that gives a picture (GPT_IMAGE_EFFORT); the picture is made by the image tool, not by thinking
+# Oct 27: codex wraps even "Reply with OK" into ~19k input tokens: its own system prompt (18k characters), 40k characters
+# of tools (sub-agents, sleep, user questions), the owner's skills (25k characters), project docs, the environment. The
+# picture needs none of it: a one-line instruction instead of the system prompt, everything else off; what stays is the
+# image generation tool and the shell it is called through (exec). 19105 -> 4611 tokens on a text run (GPT_IMAGE_LEAN=0 - as before).
+LEAN_INSTRUCTIONS = "You draw pictures with the image generation tool. Do exactly what the user asks, answer briefly."
+LEAN_FEATURES = ("multi_agent", "multi_agent_v2", "sleep_tool", "goals", "memories", "apps", "plugins", "hooks",
+                 "skill_search", "tool_suggest", "view_image", "browser_use", "computer_use",
+                 "skill_mcp_dependency_install", "remote_plugin", "shell_snapshot")   # -c features.X=false: an unknown one is ignored
+LEAN_CONFIG = ("agents.enabled=false", "web_search=\"disabled\"", "project_doc_max_bytes=0", "skills.max_context_tokens=1")
 JOBS, MAX_JOBS = 3, 4   # codex runs at once: a ChatGPT subscription holds several generations; more - the limit hits more often
 STAGGER = 3             # s between starts: codex refreshes the login at start - not all at once
 PAUSE = 120             # s after hitting the limit - before every one-by-one retry (the GPT limit on
@@ -170,6 +179,23 @@ def isolated():
     except OSError:
         return None
     return home
+
+
+def lean():
+    """Is the thin codex run on? (GPT_IMAGE_LEAN=0 turns it off)"""
+    return os.environ.get("GPT_IMAGE_LEAN", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def lean_args(instructions):
+    """codex flags that take the wrapper off: our one-line instructions file, no extra tools, skills, docs, web search.
+    The image generation tool and exec are not touched."""
+    path = instructions.replace("\\", "/")
+    args = ["-c", f'model_instructions_file="{path}"']
+    for c in LEAN_CONFIG:
+        args += ["-c", c]
+    for f in LEAN_FEATURES:
+        args += ["-c", f"features.{f}=false"]
+    return args
 
 
 def alive(pid):
@@ -493,6 +519,12 @@ def attempt(job, out, model):
     print(tr("using", model=model, effort=effort()), file=sys.stderr, flush=True)   # which model bills the limit - visible
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", work, "-s", "workspace-write", "-o", last,
            "-m", model, "-c", f"model_reasoning_effort={effort()}"]
+    instructions = ""
+    if lean():
+        fd, instructions = tempfile.mkstemp(prefix="gpt-image-instr-", suffix=".txt", dir=home or None)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(LEAN_INSTRUCTIONS + "\n")
+        cmd += lean_args(instructions)
     for r in job["refs"]:
         cmd += ["-i", r]
     # the prompt goes through stdin ("-"): on Windows codex is the codex.cmd wrapper, and cmd.exe cut a multi-line
@@ -508,6 +540,11 @@ def attempt(job, out, model):
             take(home, path)
     finally:
         free_slot(slot)
+        if instructions and not home:
+            try:
+                os.remove(instructions)
+            except OSError:
+                pass
         if home:
             settle(home)
     said = ""
