@@ -55,7 +55,9 @@ WORK = "work"           # the model's folder inside the run home (-C): its copy 
 # Codex with a ChatGPT account", Oct 16 and 21) is remembered on this machine for UNSUPPORTED_TTL, and the next picture
 # does not spend a run on it; then the next one in the list. Never the owner's model from config.toml: it is the heavy
 # one. GPT_IMAGE_MODEL - your own: one model or a comma-separated list, taken as is, in that order.
-MODELS = ("gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra")
+# Only the luna class ("fast and affordable"): terra, sol and astra are the balanced and the heavy ones - never, and none
+# of them is a fallback: no light model accepted - an error, not a quiet switch to a costly one.
+MODELS = ("gpt-6-luna", "gpt-5.6-luna")
 UNSUPPORTED = re.compile(r"model is not supported|model_not_found|does not exist or you do not have access", re.I)
 UNSUPPORTED_TTL = 12 * 3600   # s; the login may get the model later (GPT_IMAGE_UNSUPPORTED_TTL)
 EFFORT = "low"          # the least that gives a picture (GPT_IMAGE_EFFORT); the picture is made by the image tool, not by thinking
@@ -92,6 +94,10 @@ STR = {
         "batch_list": "gpt-image: --batch must be a JSON list of pictures",
         "no_reference": "gpt-image: reference not found: {files}",
         "none_made": "gpt-image: no pictures were made - {reason}",
+        "using": "model {model}, effort {effort}",
+        "no_light": "no light model is accepted by this ChatGPT login ({tried}); a heavier one is not tried on purpose",
+        "which": "next picture: {models}, effort {effort}; refused on this machine: {refused}",
+        "none": "none",
     },
     "ru": {
         "no_codex": "gpt-image: нет codex — поставьте Codex CLI (или ChatGPT.app) и войдите: codex login",
@@ -114,6 +120,10 @@ STR = {
         "batch_list": "gpt-image: --batch — JSON-список картинок",
         "no_reference": "gpt-image: нет референса: {files}",
         "none_made": "gpt-image: картинок не получилось — {reason}",
+        "using": "модель {model}, effort {effort}",
+        "no_light": "ни одну лёгкую модель этот вход ChatGPT не принял ({tried}); тяжелее специально не пробую",
+        "which": "следующая картинка: {models}, effort {effort}; отказанные на этой машине: {refused}",
+        "none": "нет",
     },
 }
 
@@ -454,14 +464,21 @@ def run(job, out):
     """One picture: the first model of the list; the login did not accept it - remember that and take the next.
     -> (file or None, why not)."""
     explicit = bool(os.environ.get("GPT_IMAGE_MODEL"))
-    got = (None, "")
+    got, tried = (None, ""), []
     for model in models():
+        tried.append(model)
         got = attempt(job, out, model)
         if got[0] or not UNSUPPORTED.search(got[1]):
             return got
         if not explicit:
             remember_unsupported(model)
+    if not explicit:
+        got = (None, tr("no_light", tried=", ".join(tried)) + ": " + got[1])
     return got
+
+
+def effort():
+    return os.environ.get("GPT_IMAGE_EFFORT") or EFFORT
 
 
 def attempt(job, out, model):
@@ -473,8 +490,9 @@ def attempt(job, out, model):
     work = os.path.join(home, WORK) if home else out
     if home:
         os.makedirs(work, exist_ok=True)
+    print(tr("using", model=model, effort=effort()), file=sys.stderr, flush=True)   # which model bills the limit - visible
     cmd = [codex(), "exec", "--skip-git-repo-check", "-C", work, "-s", "workspace-write", "-o", last,
-           "-m", model, "-c", f"model_reasoning_effort={os.environ.get('GPT_IMAGE_EFFORT') or EFFORT}"]
+           "-m", model, "-c", f"model_reasoning_effort={effort()}"]
     for r in job["refs"]:
         cmd += ["-i", r]
     # the prompt goes through stdin ("-"): on Windows codex is the codex.cmd wrapper, and cmd.exe cut a multi-line
@@ -566,6 +584,7 @@ def main():
     ap.add_argument("--prompt-file")
     ap.add_argument("--out")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--which-model", action="store_true", help="print which model the next picture goes to; no run")
     ap.add_argument("-i", "--image", action="append", default=[])
     ap.add_argument("--n", type=int, default=1)
     ap.add_argument("--name", default="image")
@@ -577,6 +596,10 @@ def main():
         free, line = status()
         print(line)
         sys.exit(0 if free else 2)
+    if a.which_model:
+        refused = sorted(unsupported())
+        print(tr("which", models=", ".join(models()), effort=effort(), refused=", ".join(refused) or tr("none")))
+        sys.exit(0)
     if not a.out:
         ap.error(tr("need_out"))
     if a.batch:

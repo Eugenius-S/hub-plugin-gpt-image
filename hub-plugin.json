@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "description": "Sessions draw pictures on your ChatGPT subscription, no API key and no extra payment: from a description and up to 16 references, the result lands straight in the project folder. Descriptions and references go to OpenAI",
   "why": "A session hands over a finished picture, not just a description for one",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "hub": "^1.0",
   "skills": true,
   "i18n": {

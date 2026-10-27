@@ -44,7 +44,7 @@ if os.environ.get("FAKE_REFRESH"):        # codex refreshed the login: wrote aut
     os.remove(os.path.join(h, "auth.json"))
     open(os.path.join(h, "auth.json"), "w").write("fresh")
 m = a[a.index("-m") + 1] if "-m" in a else None
-if m and m == os.environ.get("FAKE_UNSUPPORTED"):   # the model is not for this login (ChatGPT login, Oct 16 Windows)
+if m and m in os.environ.get("FAKE_UNSUPPORTED", "").split(","):   # the model is not for this login (ChatGPT login, Oct 16 Windows)
     sys.stderr.write("ERROR: The " + repr(m) + " model is not supported when using Codex with a ChatGPT account.\\n")
     sys.exit(1)
 cd = a[a.index("-C") + 1]
@@ -156,6 +156,28 @@ class Script(unittest.TestCase):
         os.remove(self.log + ".all")
         self.assertEqual(self.run_script("--out", self.out, "apple", env=env).returncode, 0)
         self.assertEqual(self.models_of(), ["gpt-5.6-luna"])
+
+    def test_no_light_model_accepted_is_an_error_not_a_heavy_fallback(self):
+        """Every light model refused: a clear error; terra, sol and the owner's model are never tried."""
+        open(os.path.join(self.home, "config.toml"), "w").write('model = "gpt-6.1-sol"\n')
+        r = self.run_script("--out", self.out, "apple", env={"FAKE_UNSUPPORTED": "gpt-6-luna,gpt-5.6-luna"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.models_of(), ["gpt-6-luna", "gpt-5.6-luna"])
+        self.assertIn("no light model is accepted", r.stderr + r.stdout)
+
+    def test_the_model_of_each_run_is_printed(self):
+        r = self.run_script("--out", self.out, "apple")
+        self.assertIn("model gpt-6-luna, effort low", r.stderr)
+
+    def test_which_model_shows_the_choice_without_a_run(self):
+        env = {"FAKE_UNSUPPORTED": "gpt-6-luna"}
+        r = self.run_script("--which-model")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("gpt-6-luna, gpt-5.6-luna, effort low", r.stdout)
+        self.assertFalse(os.path.exists(self.log))
+        self.run_script("--out", self.out, "apple", env=env)
+        self.assertIn("next picture: gpt-5.6-luna, effort low; refused on this machine: gpt-6-luna",
+                      self.run_script("--which-model").stdout)
 
     def test_the_memory_of_a_refusal_expires(self):
         env = {"FAKE_UNSUPPORTED": "gpt-6-luna", "GPT_IMAGE_UNSUPPORTED_TTL": "0"}

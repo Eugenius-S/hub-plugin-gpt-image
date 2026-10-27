@@ -28,10 +28,11 @@ pauses everyone. No free slot - the run waits its turn instead of hammering the 
 "GPT free: k of N slots" or "GPT busy until HH:MM:SS: by whom": if free - the session sends the next frame at once,
 not idling.
 
-The models are the lightest ones, in order: `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.6-terra`, reasoning effort `low`
+The models are the lightest (luna class) ones, in order: `gpt-6-luna`, `gpt-5.6-luna`, reasoning effort `low`
 (the picture is drawn by the image tool, not by thinking). If the ChatGPT login does not accept a model ("model is not
 supported"), the script remembers that on this machine for 12 h (`GPT_IMAGE_UNSUPPORTED_TTL`, s) - the next pictures do
-not spend a Codex run on it - and takes the next one. It never falls back to the model from `~/.codex/config.toml`: that
+not spend a Codex run on it - and takes the next one; none accepted - an error, not a heavier model. Every run prints
+its model and effort to stderr; `gpt-image --which-model` shows the choice without a run. It never falls back to the model from `~/.codex/config.toml`: that
 is usually a heavy one and eats the ChatGPT limit. `GPT_IMAGE_MODEL` - your own model or a comma-separated list, taken as
 is, in that order; `GPT_IMAGE_EFFORT` - your own effort. The prompt
 reaches Codex through stdin: on Windows a multi-line prompt arrives whole.
